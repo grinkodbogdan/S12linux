@@ -8,8 +8,11 @@ deconfig)
 bound | renew)
 	ip addr flush dev $interface
 	ip addr add $ip/${mask:-24} ${broadcast:+broadcast $broadcast} dev $interface
+	# Ethernet is preferred over Wi-Fi when both are connected
+	METRIC=10
+	[ -e /sys/class/net/$interface/phy80211 ] && METRIC=20
 	for r in $router; do
-		ip route replace default via $r dev $interface
+		ip route replace default via $r dev $interface metric $METRIC
 		break
 	done
 	: > /run/resolv.conf.new

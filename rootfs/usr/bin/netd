@@ -1,0 +1,98 @@
+#!/bin/sh
+# Network daemon. Brings the network cards up, runs wpa_supplicant on the Wi-Fi cards and DHCP
+# while a cable is plugged in or a Wi-Fi network is joined, and writes /run/net/status for the
+# desktop and debug-test, one line per card:
+#   eth0 tg3 00:11:22:33:44:55 link up 100Mb/s active inet 192.168.1.20/24 gateway 192.168.1.1 rx ... tx ...
+#   wlan0 b43 00:11:22:33:44:66 link up 54Mb/s active inet ... rx ... tx ... wifi MyNetwork
+# A Wi-Fi card without its firmware shows "no-firmware", with the radio switched off "radio-off".
+#
+# Interfaces listed in /run/net/ignore (one per line) are left alone.
+#
+# It also looks for the data stick during the first minute (s12-data), and once the network is
+# up, installs again the packages remembered on it.
+
+export PATH=/usr/bin:/bin
+CONF=/etc/wpa_supplicant.conf
+TICK=0
+RESTORED=0
+
+wifi_line() {
+	IF=$1
+	PID=/run/net/wpa.$IF.pid
+	# Radio switched off (the switch on the front, or 'wifi off')
+	for r in /sys/class/net/$IF/phy80211/rfkill*; do
+		[ -e $r/soft ] || continue
+		if [ "$(cat $r/soft)" = 1 ] || [ "$(cat $r/hard)" = 1 ]; then
+			echo " radio-off"
+			return
+		fi
+	done
+	DRV=$(basename "$(readlink /sys/class/net/$IF/device/driver)" 2>/dev/null)
+	if [ "$DRV" = b43 ] && [ ! -d /lib/firmware/b43 ]; then
+		echo " no-firmware"
+		return
+	fi
+	if [ ! -s $PID ] || ! kill -0 $(cat $PID) 2>/dev/null; then
+		ip link set $IF up 2>/dev/null
+		wpa_supplicant -B -q -i $IF -c $CONF -P $PID -D nl80211 >/dev/null 2>&1
+	fi
+}
+
+while :; do
+	STATUS=""
+	for d in /sys/class/net/*; do
+		IF=${d##*/}
+		[ -e $d/device ] || continue
+		grep -qx "$IF" /run/net/ignore 2>/dev/null && continue
+		DRV=$(basename "$(readlink $d/device/driver)" 2>/dev/null)
+		LINE="$IF $DRV $(cat $d/address)"
+		EXTRA=""
+		if [ -e $d/phy80211 ]; then
+			EXTRA=$(wifi_line $IF)
+		elif [ $(( $(cat $d/flags) & 1 )) = 0 ]; then
+			# Cards that appear later, like USB adapters, are brought up too
+			ip link set $IF up
+		fi
+		DHCP=/run/net/udhcpc.$IF.pid
+		if [ -z "$EXTRA" ] && [ "$(cat $d/carrier 2>/dev/null)" = 1 ]; then
+			SPEED=$(cat $d/speed 2>/dev/null)
+			[ "${SPEED:--1}" -gt 0 ] 2>/dev/null || SPEED=""
+			LINE="$LINE link up${SPEED:+ ${SPEED}Mb/s}"
+			if [ ! -s $DHCP ] || ! kill -0 $(cat $DHCP) 2>/dev/null; then
+				udhcpc -i $IF -b -S -p $DHCP -s /usr/share/udhcpc/default.script -x hostname:$(hostname) >/dev/null 2>&1
+			fi
+			ADDR=$(ip -4 addr show dev $IF | grep -o 'inet [0-9./]*' | head -1)
+			GW=$(ip route show dev $IF | grep -o 'default via [0-9.]*' | head -1 | cut -d' ' -f3)
+			[ -n "$ADDR" ] && LINE="$LINE active $ADDR${GW:+ gateway $GW}"
+		else
+			LINE="$LINE link down$EXTRA"
+			if [ -s $DHCP ]; then
+				kill $(cat $DHCP) 2>/dev/null
+				rm -f $DHCP
+				ip addr flush dev $IF
+			fi
+		fi
+		LINE="$LINE rx $(cat $d/statistics/rx_packets) $(cat $d/statistics/rx_bytes) tx $(cat $d/statistics/tx_packets) $(cat $d/statistics/tx_bytes)"
+		# The network name last: it may contain spaces
+		if [ -e $d/phy80211 ] && [ -S /run/wpa_supplicant/$IF ]; then
+			SSID=$(wpa_cli -p /run/wpa_supplicant -i $IF status 2>/dev/null | sed -n 's/^ssid=//p')
+			[ -n "$SSID" ] && LINE="$LINE wifi $SSID"
+		fi
+		STATUS="$STATUS$LINE
+"
+	done
+	printf '%s' "$STATUS" > /run/net/status.new && mv /run/net/status.new /run/net/status
+
+	# The data stick: USB sticks take a few seconds to appear after boot
+	if [ $TICK -lt 30 ] && [ ! -d /data/s12linux ]; then
+		s12-data mount 2>/dev/null
+	fi
+	# Packages remembered on the data stick, once there is a network
+	if [ $RESTORED = 0 ] && [ -s /data/s12linux/packages ] && grep -q ' active ' /run/net/status; then
+		RESTORED=1
+		(xbps-install -Sy $(cat /data/s12linux/packages) > /run/xbps-restore.log 2>&1 &&
+			echo "netd: packages installed again: $(tr '\n' ' ' < /data/s12linux/packages)" > /dev/kmsg) &
+	fi
+	TICK=$((TICK + 1))
+	sleep 2
+done

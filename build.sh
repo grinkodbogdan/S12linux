@@ -3,7 +3,7 @@
 # browser, the root file system and the bootable image.
 #
 # usage: ./build.sh [step...]
-#   steps: fetch toolchain kernel busybox desk web rootfs image (default: all, in this order)
+#   steps: fetch toolchain kernel busybox desk web wifi rootfs image (default: all, in order)
 #
 # Everything happens in $WORK (default: ./work). Needs a Linux x86_64 machine with gcc, make,
 # flex, bison, bc, perl, xz, cpio, python3, curl, grub-pc-bin and xorriso.
@@ -37,9 +37,23 @@ step_fetch() {
 	fetch_one "$ZIG_URL" "$ZIG_SHA256"
 	fetch_one "$DEJAVU_URL" "$DEJAVU_SHA256"
 	fetch_one "$CACERT_URL" - cacert.pem
-	for w in $WEB_SOURCES; do
+	for w in $WEB_SOURCES $WIFI_SOURCES; do
 		fetch_one "$(echo $w | cut -d'|' -f1)" "$(echo $w | cut -d'|' -f2)"
 	done
+	mkdir -p "$DL/firmware"
+	for f in $FIRMWARE_FILES; do
+		p=${f%%|*}
+		mkdir -p "$DL/firmware/$(dirname $p)"
+		fetch_one "$FIRMWARE_URL/$p?h=$FIRMWARE_TAG" "${f#*|}" "firmware/$p"
+	done
+	mkdir -p "$DL/regdb"
+	for f in $REGDB_FILES; do
+		fetch_one "$REGDB_URL/${f%%|*}?h=$REGDB_TAG" "${f#*|}" "regdb/${f%%|*}"
+	done
+	# The static XBPS is rebuilt from time to time: it is checked against Void's own list
+	fetch_one "$XBPS_URL" -
+	SUM=$(curl -fsSL "${XBPS_URL%/*}/sha256sums.txt" | awk -v f="${XBPS_URL##*/}" '$2 == f { print $1 }')
+	echo "$SUM  $DL/${XBPS_URL##*/}" | sha256sum -c --quiet - || { echo "bad checksum: ${XBPS_URL##*/}"; exit 1; }
 }
 
 # Cross compiler: zig cc for i686 musl, static, tuned for the Atom (bonnell)
@@ -163,28 +177,88 @@ step_web() {
 	)
 }
 
+# Wi-Fi tools: libnl, wpa_supplicant (WPA/WPA2, wpa_cli), iw, and b43-fwcutter, all static
+step_wifi() {
+	log "Building the Wi-Fi tools"
+	W=$WORK/wifi
+	SYS=$W/sysroot
+	mkdir -p "$W/src" "$W/logs" "$SYS"
+	for w in $WIFI_SOURCES; do
+		f=$(echo $w | cut -d'|' -f1); f=${f##*/}
+		d=$(echo $w | cut -d'|' -f3)
+		[ -d "$W/src/$d" ] || tar xf "$DL/$f" -C "$W/src"
+	done
+	(
+		export CC=$CROSS-gcc AR=$CROSS-ar RANLIB=$CROSS-ranlib STRIP=$CROSS-strip
+		export PKG_CONFIG_PATH=$SYS/lib/pkgconfig PKG_CONFIG_LIBDIR=$SYS/lib/pkgconfig
+		L=$W/logs
+		if [ ! -f $SYS/lib/libnl-genl-3.a ]; then echo libnl
+			cd $W/src/libnl-3.11.0 && ./configure --host=i686-linux-musl --prefix=$SYS --disable-shared --enable-static \
+				--disable-cli --disable-debug > $L/libnl.log 2>&1 && make -j$JOBS >> $L/libnl.log 2>&1 && make install >> $L/libnl.log 2>&1
+		fi
+		echo wpa_supplicant
+		cd $W/src/wpa_supplicant-2.12/wpa_supplicant
+		cp "$TOP/wifi/wpa_supplicant.config" .config
+		make -j$JOBS CC=$CC EXTRA_CFLAGS="-Os -I$SYS/include/libnl3" LDFLAGS="-static -L$SYS/lib" \
+			wpa_supplicant wpa_cli wpa_passphrase > $L/wpa.log 2>&1
+		echo iw
+		make -C $W/src/iw-6.17 -j$JOBS CC=$CC LDFLAGS=-static PKG_CONFIG=pkg-config > $L/iw.log 2>&1
+		echo b43-fwcutter
+		make -C $W/src/b43-fwcutter-019 CC=$CC LDFLAGS=-static > $L/b43.log 2>&1
+	)
+}
+
 step_rootfs() {
 	log "Staging the root file system"
 	R=$WORK/root
 	rm -rf "$R"
-	mkdir -p $R/bin $R/sbin $R/usr/bin $R/usr/sbin $R/etc $R/dev $R/proc $R/sys $R/tmp $R/run $R/mnt $R/root
+	# Void Linux's layout, so that its packages install as they expect: everything in /usr
+	mkdir -p $R/usr/bin $R/usr/lib/firmware $R/usr/libexec $R/usr/share $R/etc $R/dev $R/proc $R/sys \
+		$R/tmp $R/run $R/mnt $R/data $R/root $R/var/db/xbps $R/var/cache $R/var/log $R/var/tmp
+	ln -s usr/bin $R/bin
+	ln -s usr/bin $R/sbin
+	ln -s bin $R/usr/sbin
+	ln -s usr/lib $R/lib
+	# Void's 32-bit glibc looks for libraries in /usr/lib32
+	ln -s lib $R/usr/lib32
+	ln -s usr/lib $R/lib32
 	BB=$WORK/busybox-$BUSYBOX_VERSION
-	$CROSS-strip -o $R/bin/busybox $BB/busybox_unstripped
+	$CROSS-strip -o $R/usr/bin/busybox $BB/busybox_unstripped
 	while read -r link; do
-		case $link in
-			/bin/*) ln -s busybox $R$link ;;
-			/usr/bin/* | /usr/sbin/*) ln -s ../../bin/busybox $R$link ;;
-			/sbin/*) ln -s ../bin/busybox $R$link ;;
-		esac
+		name=${link##*/}
+		case $name in init | poweroff | reboot | halt | busybox) continue ;; esac
+		[ -e $R/usr/bin/$name ] || ln -s busybox $R/usr/bin/$name
 	done < $BB/busybox.links
-	cp $WORK/desk/minit $R/sbin/init
-	cp $WORK/desk/minit $R/sbin/textinit
-	for c in poweroff reboot halt; do ln -sf init $R/sbin/$c; done
-	cp $WORK/desk/desk $R/bin/desk
+	# init, also run as poweroff, reboot and halt
+	cp $WORK/desk/minit $R/usr/bin/init
+	cp $WORK/desk/minit $R/usr/bin/textinit
+	for c in poweroff reboot halt; do ln -s init $R/usr/bin/$c; done
+	cp $WORK/desk/desk $R/usr/bin/desk
 	cp $WORK/desk/soundtest $R/usr/bin/soundtest
 	cp -a "$TOP/rootfs/." $R/
 	ln -s /run/resolv.conf $R/etc/resolv.conf
 	ln -s /proc/mounts $R/etc/mtab
+	# Package manager: the XBPS commands unpack the static XBPS on first use (usr/libexec/s12/xbps)
+	for t in install query remove reconfigure alternatives pkgdb uhelper; do
+		ln -s ../libexec/s12/xbps $R/usr/bin/xbps-$t
+	done
+	# Wi-Fi: tools, free firmware, and the regulatory database
+	WS=$WORK/wifi/src
+	for b in wpa_supplicant-2.12/wpa_supplicant/wpa_supplicant wpa_supplicant-2.12/wpa_supplicant/wpa_cli \
+		iw-6.17/iw b43-fwcutter-019/b43-fwcutter; do
+		$CROSS-strip -o $R/usr/bin/${b##*/} $WS/$b
+	done
+	for f in $FIRMWARE_FILES; do
+		p=${f%%|*}
+		case $p in
+		LICENSES/*) mkdir -p $R/usr/share/licenses/linux-firmware && cp "$DL/firmware/$p" $R/usr/share/licenses/linux-firmware/ ;;
+		*) mkdir -p "$R/usr/lib/firmware/$(dirname $p)" && cp "$DL/firmware/$p" "$R/usr/lib/firmware/$p" ;;
+		esac
+	done
+	# Older drivers look for the Intel firmware at the top
+	for f in $R/usr/lib/firmware/intel/iwlwifi/*; do ln -s intel/iwlwifi/${f##*/} $R/usr/lib/firmware/${f##*/}; done
+	cp "$DL/regdb/regulatory.db" "$DL/regdb/regulatory.db.p7s" $R/usr/lib/firmware/
+	mkdir -p $R/usr/share/licenses/wireless-regdb && cp "$DL/regdb/LICENSE" $R/usr/share/licenses/wireless-regdb/
 	# Web browser: NetSurf with its resources, fonts, and the Mozilla CA certificates
 	mkdir -p $R/usr/share/netsurf $R/usr/share/fonts $R/etc/ssl/certs $R/root/.netsurf
 	$CROSS-strip -o $R/usr/bin/netsurf-fb $WORK/web/stage/usr/bin/netsurf-fb
@@ -195,6 +269,8 @@ step_rootfs() {
 		cp $WORK/dejavu/ttf/$f.ttf $R/usr/share/fonts/
 	done
 	cp "$DL/cacert.pem" $R/etc/ssl/certs/ca-certificates.crt
+	# The name XBPS (LibreSSL) looks for
+	ln -s certs/ca-certificates.crt $R/etc/ssl/cert.pem
 	$CROSS-strip -o $R/usr/bin/curl $WORK/web/src/curl-8.10.1/src/curl
 	cp "$TOP/netsurf/Choices" $R/root/.netsurf/Choices
 	cp "$TOP/netsurf/Choices" $R/usr/share/netsurf/Choices
@@ -208,12 +284,15 @@ step_image() {
 	cp $WORK/bzImage $I/boot/linux
 	(cd $WORK/root && find . | sort | cpio -o -H newc --owner=0:0 --quiet) | xz -9 --check=crc32 > $I/boot/initramfs.xz
 	cp "$TOP/boot/grub.cfg" $I/boot/grub/grub.cfg
+	# XBPS stays on the stick, out of RAM, until it is used
+	mkdir -p $I/s12
+	cp "$DL/${XBPS_URL##*/}" $I/s12/
 	grub-mkrescue -o $WORK/s12-linux.iso $I 2> /dev/null
 	ls -l $WORK/s12-linux.iso
 	sha256sum $WORK/s12-linux.iso
 }
 
-STEPS=${*:-fetch toolchain kernel busybox desk web rootfs image}
+STEPS=${*:-fetch toolchain kernel busybox desk web wifi rootfs image}
 for s in $STEPS; do
 	step_$s
 done

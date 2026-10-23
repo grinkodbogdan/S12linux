@@ -10,6 +10,7 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -43,12 +44,15 @@ static const mu_Color palette[17] = {
 	{210, 210, 210, 255},
 };
 
+/* The terminal runs a login shell, or the command `arg` followed by a shell */
 static void *term_create(Window *win, const char *arg) {
 	(void)win;
-	(void)arg;
 	TermApp *a = calloc(1, sizeof(TermApp));
-	char *argv[] = {"/bin/sh", "-l", NULL};
-	if (term_spawn(&a->t, 80, 24, argv) < 0)
+	char cmd[512];
+	snprintf(cmd, sizeof(cmd), "%s; echo; exec /bin/sh -l", arg ? arg : "");
+	char *shell[] = {"/bin/sh", "-l", NULL};
+	char *command[] = {"/bin/sh", "-c", cmd, NULL};
+	if (term_spawn(&a->t, 80, 24, arg ? command : shell) < 0)
 		a->t.alive = 0;
 	return a;
 }
@@ -962,7 +966,7 @@ static void about_draw(mu_Context *ctx, Window *win) {
 	mu_Rect sr = mu_layout_next(ctx);
 	draw_text_font(ctx, font_small, sub, sr.x + (sr.w - tw) / 2, sr.y + 2, text_dim);
 	const char *labels[] = {"Kernel", "Processor", "Memory", "Graphics", "Display", "Shell", "Desktop"};
-	const char *values[] = {a->kernel, a->cpu, a->memory, a->graphics, a->display, "hush",
+	const char *values[] = {a->kernel, a->cpu, a->memory, a->graphics, a->display, "ash",
 		"S12 Desk (microui " MU_VERSION ")"};
 	mu_Rect c = card(ctx, 7 * 30 + 16);
 	for (int i = 0; i < 7; i++) {
@@ -972,6 +976,319 @@ static void about_draw(mu_Context *ctx, Window *win) {
 		if (i < 6)
 			mu_draw_rect(ctx, mu_rect(c.x + 16, y + 29, c.w - 32, 1), mu_color(255, 255, 255, 12));
 	}
+}
+
+/* ---------------------------------------------------------------- Wi-Fi */
+
+/* A front end to the `wifi` command, which does the work in the background: the window never
+ * waits for a scan or a connection */
+typedef struct {
+	char ssid[64];
+	char security[12];
+	int signal;
+	int saved;
+} WifiNet;
+
+typedef struct {
+	char iface[16];
+	char state[24];     /* connected, connecting, down, no-firmware, radio-off, none */
+	char ssid[64];
+	char addr[32];
+	WifiNet nets[40];
+	int count;
+	char saved[40][64];
+	int saved_count;
+	int selected;
+	char password[64];
+	char message[200];
+	pid_t job;
+	int job_kind;       /* 1 scan, 2 connect, 3 saved list, 4 other */
+	long last_status;
+	long last_scan;
+} WifiApp;
+
+#define WIFI_OUT "/run/desk-wifi.out"
+
+/* Runs `wifi ARGS...` in the background, its output into WIFI_OUT */
+static void wifi_job(WifiApp *a, int kind, char *const argv[]) {
+	if (a->job > 0)
+		return;
+	pid_t pid = fork();
+	if (pid == 0) {
+		int fd = open(WIFI_OUT, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		if (fd >= 0) {
+			dup2(fd, 1);
+			dup2(fd, 2);
+		}
+		execv("/usr/bin/wifi", argv);
+		_exit(127);
+	}
+	if (pid > 0) {
+		a->job = pid;
+		a->job_kind = kind;
+	}
+}
+
+/* The Wi-Fi card's line of /run/net/status */
+static void wifi_status(WifiApp *a) {
+	char buf[2048];
+	snprintf(a->state, sizeof(a->state), "none");
+	if (read_file("/run/net/status", buf, sizeof(buf)) <= 0)
+		return;
+	for (char *line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
+		char name[16] = "", path[64];
+		sscanf(line, "%15s", name);
+		snprintf(path, sizeof(path), "/sys/class/net/%s/phy80211", name);
+		if (access(path, F_OK))
+			continue;
+		snprintf(a->iface, sizeof(a->iface), "%s", name);
+		char *wifi = strstr(line, " wifi ");
+		snprintf(a->ssid, sizeof(a->ssid), "%s", wifi ? wifi + 6 : "");
+		a->addr[0] = 0;
+		char *inet = strstr(line, " inet ");
+		if (inet)
+			sscanf(inet + 6, "%31[0-9.]", a->addr);
+		if (strstr(line, " no-firmware"))
+			snprintf(a->state, sizeof(a->state), "no-firmware");
+		else if (strstr(line, " radio-off"))
+			snprintf(a->state, sizeof(a->state), "radio-off");
+		else if (strstr(line, " active"))
+			snprintf(a->state, sizeof(a->state), "connected");
+		else if (strstr(line, "link up") || wifi)
+			snprintf(a->state, sizeof(a->state), "connecting");
+		else
+			snprintf(a->state, sizeof(a->state), "down");
+		return;
+	}
+}
+
+static void wifi_mark_saved(WifiApp *a) {
+	for (int i = 0; i < a->count; i++) {
+		a->nets[i].saved = 0;
+		for (int j = 0; j < a->saved_count; j++)
+			if (!strcmp(a->nets[i].ssid, a->saved[j]))
+				a->nets[i].saved = 1;
+	}
+}
+
+/* Reads the output of the finished job */
+static void wifi_job_done(WifiApp *a) {
+	char buf[4096];
+	int n = read_file(WIFI_OUT, buf, sizeof(buf));
+	if (n < 0)
+		n = 0;
+	buf[n] = 0;
+	if (a->job_kind == 1) {
+		if (strncmp(buf, "wifi:", 5)) {
+			char keep[64] = "";
+			if (a->selected >= 0 && a->selected < a->count)
+				snprintf(keep, sizeof(keep), "%s", a->nets[a->selected].ssid);
+			a->count = 0;
+			a->selected = -1;
+			for (char *line = strtok(buf, "\n"); line && a->count < 40; line = strtok(NULL, "\n")) {
+				WifiNet *w = &a->nets[a->count];
+				if (sscanf(line, "%d\t%11[^\t]\t%63[^\n]", &w->signal, w->security, w->ssid) == 3) {
+					if (!strcmp(w->ssid, keep))
+						a->selected = a->count;
+					a->count++;
+				}
+			}
+			wifi_mark_saved(a);
+			snprintf(a->message, sizeof(a->message), a->count ? "" : "No network found.");
+		} else {
+			snprintf(a->message, sizeof(a->message), "%s", buf + 6);
+		}
+	} else if (a->job_kind == 3) {
+		a->saved_count = 0;
+		if (strncmp(buf, "wifi:", 5))
+			for (char *line = strtok(buf, "\n"); line && a->saved_count < 40; line = strtok(NULL, "\n"))
+				snprintf(a->saved[a->saved_count++], 64, "%s", line);
+		wifi_mark_saved(a);
+	} else {
+		/* The last line says what happened */
+		char *end = buf + strlen(buf);
+		while (end > buf && (end[-1] == '\n' || end[-1] == ' '))
+			*--end = 0;
+		char *last = strrchr(buf, '\n');
+		snprintf(a->message, sizeof(a->message), "%s", last ? last + 1 : buf);
+		if (!strncmp(a->message, "wifi: ", 6))
+			memmove(a->message, a->message + 6, strlen(a->message + 6) + 1);
+		a->password[0] = 0;
+		char *saved[] = {"wifi", "saved", NULL};
+		a->job = 0;
+		wifi_job(a, 3, saved);
+		return;
+	}
+	a->job = 0;
+}
+
+static void *wifi_create(Window *win, const char *arg) {
+	(void)win;
+	(void)arg;
+	WifiApp *a = calloc(1, sizeof(WifiApp));
+	a->selected = -1;
+	wifi_status(a);
+	char *saved[] = {"wifi", "saved", NULL};
+	wifi_job(a, 3, saved);
+	return a;
+}
+
+static int wifi_poll(Window *win) {
+	WifiApp *a = win->state;
+	int redraw = 0;
+	if (a->job > 0 && waitpid(a->job, NULL, WNOHANG) == a->job) {
+		wifi_job_done(a);
+		redraw = 1;
+	}
+	long now = now_ms();
+	if (now - a->last_status > 2000) {
+		char before[24];
+		snprintf(before, sizeof(before), "%s", a->state);
+		wifi_status(a);
+		a->last_status = now;
+		redraw |= strcmp(before, a->state) != 0;
+		/* A first scan as soon as the card works, then one every 30 seconds while the window is open */
+		if (a->job <= 0 && (!strcmp(a->state, "down") || !strcmp(a->state, "connected")
+			|| !strcmp(a->state, "connecting")) && (a->last_scan == 0 || now - a->last_scan > 30000)) {
+			char *scan[] = {"wifi", "scan", NULL};
+			wifi_job(a, 1, scan);
+			a->last_scan = now;
+		}
+	}
+	return redraw;
+}
+
+/* Signal strength as four bars */
+static void draw_bars(mu_Context *ctx, mu_Rect r, int signal, mu_Color on) {
+	for (int i = 0; i < 4; i++) {
+		int h = 4 + i * 3;
+		mu_Color c = signal > i * 25 ? on : mu_color(80, 80, 80, 255);
+		mu_draw_rect(ctx, mu_rect(r.x + i * 5, r.y + r.h - h, 3, h), c);
+	}
+}
+
+static void wifi_draw(mu_Context *ctx, Window *win) {
+	WifiApp *a = win->state;
+	char line[160];
+	const char *hint = NULL;
+	if (!strcmp(a->state, "none")) {
+		snprintf(line, sizeof(line), "No Wi-Fi card found");
+		hint = "Plug in a USB Wi-Fi adapter, or run debug-test in a terminal for details.";
+	} else if (!strcmp(a->state, "no-firmware")) {
+		snprintf(line, sizeof(line), "The Wi-Fi card needs its firmware");
+		hint = "Broadcom does not allow it to be included: it is downloaded once (Ethernet needed).";
+	} else if (!strcmp(a->state, "radio-off")) {
+		snprintf(line, sizeof(line), "Wi-Fi is switched off");
+		hint = "Slide the wireless switch on the front edge of the S12, or turn it on here.";
+	} else if (!strcmp(a->state, "connected")) {
+		snprintf(line, sizeof(line), "Connected to %.60s", a->ssid);
+	} else if (!strcmp(a->state, "connecting")) {
+		snprintf(line, sizeof(line), "Connecting%s%.60s...", a->ssid[0] ? " to " : "", a->ssid);
+	} else {
+		snprintf(line, sizeof(line), "Not connected");
+	}
+	mu_layout_row(ctx, 1, (int[]){-1}, 26);
+	label_font(ctx, font_bold, line, text_bright);
+	if (!strcmp(a->state, "connected") && a->addr[0]) {
+		mu_layout_row(ctx, 1, (int[]){-1}, 18);
+		snprintf(line, sizeof(line), "%s, address %s", a->iface, a->addr);
+		label_font(ctx, font_small, line, text_dim);
+	}
+	if (hint) {
+		mu_layout_row(ctx, 1, (int[]){-1}, 18);
+		label_font(ctx, font_small, hint, text_dim);
+	}
+	mu_layout_row(ctx, 3, (int[]){110, 110, -1}, 28);
+	if (!strcmp(a->state, "no-firmware")) {
+		if (mu_button(ctx, "Install firmware"))
+			open_app(APP_TERMINAL, "wifi-firmware");
+	} else if (!strcmp(a->state, "radio-off")) {
+		if (mu_button(ctx, "Turn on")) {
+			char *on[] = {"wifi", "on", NULL};
+			wifi_job(a, 4, on);
+		}
+	} else if (strcmp(a->state, "none")) {
+		if (mu_button(ctx, a->job > 0 && a->job_kind == 1 ? "Scanning..." : "Scan") && a->job <= 0) {
+			char *scan[] = {"wifi", "scan", NULL};
+			wifi_job(a, 1, scan);
+			a->last_scan = now_ms();
+		}
+		if (!strcmp(a->state, "connected") && mu_button(ctx, "Disconnect")) {
+			char *off[] = {"wifi", "disconnect", NULL};
+			wifi_job(a, 4, off);
+		}
+	}
+	if (a->message[0]) {
+		mu_layout_row(ctx, 1, (int[]){-1}, 20);
+		label_font(ctx, font_small, a->message, text_dim);
+	}
+	if (!strcmp(a->state, "none") || !strcmp(a->state, "no-firmware") || !strcmp(a->state, "radio-off"))
+		return;
+	mu_layout_row(ctx, 1, (int[]){-1}, 8);
+	mu_layout_next(ctx);
+	for (int i = 0; i < a->count; i++) {
+		WifiNet *w = &a->nets[i];
+		mu_layout_row(ctx, 1, (int[]){-1}, 28);
+		mu_Rect r = mu_layout_next(ctx);
+		mu_Id id = mu_get_id(ctx, w->ssid, strlen(w->ssid));
+		mu_update_control(ctx, id, r, 0);
+		int current = !strcmp(a->state, "connected") && !strcmp(w->ssid, a->ssid);
+		if (i == a->selected)
+			mu_draw_rect(ctx, r, color_alpha(accent, 200));
+		else if (ctx->hover == id)
+			mu_draw_rect(ctx, r, color_alpha(accent, 110));
+		else if (i % 2)
+			mu_draw_rect(ctx, r, mu_color(255, 255, 255, 6));
+		draw_bars(ctx, mu_rect(r.x + 10, r.y + 6, 20, 16), w->signal, text_bright);
+		draw_text_font(ctx, current ? font_bold : font_ui, w->ssid, r.x + 40, r.y + (r.h - font_ui->height) / 2,
+			text_bright);
+		snprintf(line, sizeof(line), "%s%s%s", current ? "connected  " : w->saved ? "saved  " : "",
+			strcmp(w->security, "open") ? "secured" : "open", !strcmp(w->security, "wpa3") ? " (WPA3: not supported)" : "");
+		int tw = font_width(font_small, line, -1);
+		draw_text_font(ctx, font_small, line, r.x + r.w - tw - 12, r.y + (r.h - font_small->height) / 2, text_dim);
+		if (ctx->mouse_pressed == MU_MOUSE_LEFT && ctx->focus == id) {
+			a->selected = i;
+			a->password[0] = 0;
+			a->message[0] = 0;
+		}
+		if (i != a->selected)
+			continue;
+		/* The selected network: password and buttons */
+		int needs_password = strcmp(w->security, "open") && !w->saved;
+		if (needs_password) {
+			mu_layout_row(ctx, 2, (int[]){90, -1}, 28);
+			mu_label(ctx, "Password");
+			if (mu_textbox(ctx, a->password, sizeof(a->password)) & MU_RES_SUBMIT && a->job <= 0) {
+				char *c[] = {"wifi", "connect", w->ssid, a->password, NULL};
+				wifi_job(a, 2, c);
+				snprintf(a->message, sizeof(a->message), "Connecting to %s...", w->ssid);
+			}
+		}
+		mu_layout_row(ctx, 3, (int[]){110, 110, -1}, 28);
+		if (!current && mu_button(ctx, a->job > 0 && a->job_kind == 2 ? "Connecting..." : "Connect") && a->job <= 0) {
+			char *with[] = {"wifi", "connect", w->ssid, a->password, NULL};
+			char *without[] = {"wifi", "connect", w->ssid, NULL};
+			wifi_job(a, 2, needs_password ? with : without);
+			snprintf(a->message, sizeof(a->message), "Connecting to %s...", w->ssid);
+		}
+		if (w->saved && mu_button(ctx, "Forget") && a->job <= 0) {
+			char *f[] = {"wifi", "forget", w->ssid, NULL};
+			wifi_job(a, 4, f);
+		}
+		mu_layout_row(ctx, 1, (int[]){-1}, 6);
+		mu_layout_next(ctx);
+	}
+	if (a->count == 0 && a->job > 0 && a->job_kind == 1) {
+		mu_layout_row(ctx, 1, (int[]){-1}, 24);
+		label_font(ctx, font_ui, "Looking for networks...", text_dim);
+	}
+}
+
+static void wifi_destroy(Window *win) {
+	WifiApp *a = win->state;
+	if (a->job > 0)
+		waitpid(a->job, NULL, 0);
+	free(a);
 }
 
 /* ---------------------------------------------------------------- Registry */
@@ -993,6 +1310,8 @@ const App apps[APP_COUNT] = {
 		NULL, NULL},
 	[APP_VIEWER] = {"Viewer", "Text viewer", 620, 460, {120, 125, 135, 255}, 0, viewer_create, viewer_draw,
 		viewer_destroy, NULL, NULL},
+	[APP_WIFI] = {"Wi-Fi", "Wireless networks", 460, 520, {70, 130, 180, 255}, 1, wifi_create, wifi_draw,
+		wifi_destroy, NULL, wifi_poll},
 };
 
 /* Adds the file descriptors of the terminals to wait on */

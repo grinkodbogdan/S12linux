@@ -1,0 +1,11 @@
+Settings of XBPS, the package manager. The defaults are in /usr/share/xbps.d: a file here with
+the same name overrides one there (for example 00-repository-main.conf to use a mirror).
+
+  xbps-install -S             updates the list of packages
+  xbps-query -Rs WORD         searches the packages
+  xbps-install NAME           installs a package (and what it needs)
+  xbps-remove -R NAME         removes a package and what it alone needed
+  xbps-install -Su            updates the installed packages
+
+Packages are installed in RAM. With a data stick (s12-data setup), the packages you install
+are remembered and installed again at the next boot.

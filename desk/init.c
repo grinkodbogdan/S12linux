@@ -118,6 +118,10 @@ int main(int argc, char **argv) {
 		}
 		return 0;
 	}
+	/* The kernel starts init with an empty environment: everything started from here inherits this */
+	setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
+	setenv("HOME", "/root", 1);
+	setenv("TERM", "linux", 0);
 	struct sigaction sa = {0};
 	sa.sa_handler = on_power_signal;
 	sigaction(SIGUSR2, &sa, NULL);

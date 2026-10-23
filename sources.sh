@@ -23,3 +23,43 @@ https://www.openssl.org/source/openssl-3.0.15.tar.gz|23c666d0edf20f14249b3d8f036
 https://curl.se/download/curl-8.10.1.tar.xz|73a4b0e99596a09fa5924a4fb7e4b995a85fda0d18a2c02ab9cf134bebce04ee|curl-8.10.1
 https://github.com/libexpat/libexpat/releases/download/R_2_6_3/expat-2.6.3.tar.xz|274db254a6979bde5aad404763a704956940e465843f2a9bd9ed7af22e2c0efc|expat-2.6.3
 "
+# Wi-Fi: wpa_supplicant and iw (with libnl), and b43-fwcutter for the Broadcom firmware
+WIFI_SOURCES="
+https://github.com/thom311/libnl/releases/download/libnl3_11_0/libnl-3.11.0.tar.gz|2a56e1edefa3e68a7c00879496736fdbf62fc94ed3232c0baba127ecfa76874d|libnl-3.11.0
+https://w1.fi/releases/wpa_supplicant-2.12.tar.gz|08e23937e16d0155e55cab2b51f51fbe10d80a1aa91c4e15442645059b737ef6|wpa_supplicant-2.12
+https://mirrors.edge.kernel.org/pub/software/network/iw/iw-6.17.tar.xz|7d182e498289ab39b257da6780d562e415377107f50358ee5b55b8cfe40b1e33|iw-6.17
+https://bues.ch/b43/fwcutter/b43-fwcutter-019.tar.bz2|d6ea85310df6ae08e7f7e46d8b975e17fc867145ee249307413cfbe15d7121ce|b43-fwcutter-019
+"
+# Free firmware for Wi-Fi cards and USB dongles, from linux-firmware: path|sha256
+FIRMWARE_URL=https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain
+FIRMWARE_TAG=20260810
+FIRMWARE_FILES="
+intel/iwlwifi/iwlwifi-5000-5.ucode|da259ae4b436f4d166aad2139f23694c2737e25288095140a1809d60fe676247
+intel/iwlwifi/iwlwifi-5150-2.ucode|590d631088ad606a59318ba123dc744a02366d9dad84196ee5b078ca286ba749
+intel/iwlwifi/iwlwifi-1000-5.ucode|8e5fae67b9b84d90fd806fb907707af0ede479351848547fbe8cdf1d74005f2b
+rt2870.bin|251b8918391eac6415d60dca239e415aad0177e885376f2a17782e64fcbbe317
+ath9k_htc/htc_9271-1.4.0.fw|78f7d592a95b419a02fde7440f30c606fc31a871cf0ce150ced40d4857173eb0
+ath9k_htc/htc_7010-1.4.0.fw|737850aaf66ca13f82e0f5ca5e758f606f840c2f23c291350ab916bbf88e6f75
+rtlwifi/rtl8192cufw_TMSC.bin|c083f2db36ef33d0ffffc979aba1d40f55fa9dc38dce50f26e0108a21c080286
+rtlwifi/rtl8192cufw_A.bin|32846065b017c8b1d2d448e8c0ea2f5e741424809be49f2c6a6261339cd0b0cf
+rtlwifi/rtl8192cufw_B.bin|479e5e6732b0e07cfcab4cc190b8c30465c0b7f8c0ed22d742bedd4412cbcf2a
+rtlwifi/rtl8188eufw.bin|2ff74315287529dec2e50eb57d6e0c97d2116f28ae166773ccdf93b6360000c4
+rtlwifi/rtl8188fufw.bin|e6189d6d7032b83f0ed4284629c43db66262449a866f33fd329e611239f62e1f
+rtlwifi/rtl8723bu_nic.bin|a52b5a7be4841b4b2839eddf5122b3300a3610866abe4bb3c3c9e444c8ab7969
+rtlwifi/rtl8192eu_nic.bin|b15bc955fba2fc3abc093affe62c9f7284a0b84d4f13f8ce55366488dc9aad8b
+LICENSES/LICENCE.iwlwifi_firmware|16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5
+LICENSES/LICENCE.ralink-firmware.txt|d7bec70668ddd4aae8fb4aa32870e54b49fcdb0b9b007aa9f54b53a1ac7461bd
+LICENSES/LICENCE.rtlwifi_firmware.txt|a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e
+LICENSES/LICENCE.open-ath9k-htc-firmware|83870e84c54aa76be973a78387b342c80ef0908b8cb82edde6d54c511b18c16c
+"
+# Wi-Fi regulatory database (which channels and power each country allows)
+REGDB_URL=https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git/plain
+REGDB_TAG=master-2026-05-30
+REGDB_FILES="
+regulatory.db|2fb33ca0074db573e05ef7dd50bb45b63c0ff98b7e852e1105ebad536fae8e6b
+regulatory.db.p7s|c941c08f51c93e46722293b85631604c3740d86c3de0c75f79aef50d2e919179
+LICENSE|678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1
+"
+# Package manager: static XBPS from Void Linux (installs packages from Void's i686 repository)
+XBPS_URL=https://repo-default.voidlinux.org/static/xbps-static-latest.i686-musl.tar.xz
+XBPS_SHA256=929175fc8dd57b54292de3075cf0c7158940d7b1fc6664f0d5f98d93693136be

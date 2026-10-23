@@ -50,6 +50,7 @@ enum {
 	APP_SETTINGS,
 	APP_ABOUT,
 	APP_VIEWER,
+	APP_WIFI,
 	APP_COUNT
 };
 

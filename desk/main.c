@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -571,7 +572,7 @@ int battery_state(int *level, int *charging, char *desc, int desc_size) {
 
 /* Entries of the menu. APP_COUNT is a separator, -1 restarts the desktop, -2 reboots and -3 powers
  * off (init does it, on SIGTERM and SIGUSR2), -4 starts the web browser */
-static const int menu_items[] = {-4, APP_TERMINAL, APP_FILES, APP_COUNT, APP_MONITOR, APP_CALC, APP_MINES,
+static const int menu_items[] = {-4, APP_WIFI, APP_TERMINAL, APP_FILES, APP_COUNT, APP_MONITOR, APP_CALC, APP_MINES,
 	APP_COUNT, APP_SETTINGS, APP_ABOUT, APP_COUNT, -1, -2, -3};
 static const char *menu_actions[] = {"Restart desktop", "Reboot", "Shut down", "Web Browser"};
 static void run_fullscreen(const char *path);
@@ -581,7 +582,7 @@ static void read_mouse_discard(void);
 static const char *menu_labels[APP_COUNT] = {
 	[APP_TERMINAL] = "Terminal", [APP_FILES] = "File Manager", [APP_MONITOR] = "System Monitor",
 	[APP_CALC] = "Calculator", [APP_MINES] = "Minesweeper", [APP_SETTINGS] = "Preferences",
-	[APP_ABOUT] = "About S12 Linux",
+	[APP_ABOUT] = "About S12 Linux", [APP_WIFI] = "Wi-Fi",
 };
 
 /* A globe, for the web browser */
@@ -598,7 +599,8 @@ static void draw_globe(mu_Context *ctx, mu_Rect r, mu_Color c) {
 		}
 }
 
-/* Describes the network connection, from /run/net/status (written by netd). Cached for 3 seconds */
+/* Describes the network connection, from /run/net/status (written by netd): "eth0 10.0.0.5" or
+ * "Wi-Fi MyNetwork". A connected card wins over one connecting. Cached for 3 seconds */
 static int net_state(char *out, int size) {
 	static char cached[64];
 	static int have;
@@ -606,24 +608,35 @@ static int net_state(char *out, int size) {
 	time_t now = time(NULL);
 	if (now - last >= 3 || now < last) {
 		last = now;
-		char buf[1024];
+		char buf[2048];
 		have = 0;
 		if (read_file("/run/net/status", buf, sizeof(buf)) > 0) {
 			have = 1;
-			snprintf(cached, sizeof(cached), "no cable");
-			char *line = strtok(buf, "\n");
-			for (; line; line = strtok(NULL, "\n")) {
-				if (strncmp(line, "eth", 3))
-					continue;
+			int rank = 0;
+			snprintf(cached, sizeof(cached), "not connected");
+			for (char *line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
+				char name[16] = "";
+				sscanf(line, "%15s", name);
 				char *inet = strstr(line, " inet ");
+				char *wifi = strstr(line, " wifi ");
 				if (strstr(line, " active") && inet) {
 					char addr[32] = "";
 					sscanf(inet + 6, "%31[0-9.]", addr);
-					snprintf(cached, sizeof(cached), "%.3s%c %s", line, line[3], addr);
-					break;
-				}
-				if (strstr(line, "link up"))
+					if (wifi)
+						snprintf(cached, sizeof(cached), "Wi-Fi %.40s", wifi + 6);
+					else
+						snprintf(cached, sizeof(cached), "%s %s", name, addr);
+					/* Ethernet first, as for the default route */
+					if (!wifi)
+						break;
+					rank = 3;
+				} else if (rank < 2 && strstr(line, "link up")) {
 					snprintf(cached, sizeof(cached), "connecting...");
+					rank = 2;
+				} else if (rank < 1 && strstr(line, " no-firmware")) {
+					snprintf(cached, sizeof(cached), "Wi-Fi: firmware needed");
+					rank = 1;
+				}
 			}
 		}
 	}
@@ -1013,6 +1026,17 @@ static void draw_app_icon_shape(ShapeCommand *s) {
 		for (int i = 0; i < 4; i++)
 			gfx_rrect(mu_rect(r.x + r.w * 33 / 100, r.y + r.h * (30 + i * 12) / 100, r.w * (34 - (i == 3) * 12) / 100,
 				r.h / 20 + 1), color_alpha(c, 220), 1);
+		break;
+	case APP_WIFI:
+		/* A dot under three arcs */
+		for (int k = 1; k <= 3; k++) {
+			float rad = w * (0.12f + k * 0.13f), cx = x + w * 0.5f, cy = y + w * 0.74f;
+			for (int s = 0; s < 8; s++) {
+				float a0 = 3.92699f + s * 0.19635f, a1 = a0 + 0.19635f;
+				gfx_line(cx + rad * cosf(a0), cy + rad * sinf(a0), cx + rad * cosf(a1), cy + rad * sinf(a1), lw, white);
+			}
+		}
+		gfx_rrect(mu_rect(r.x + r.w * 44 / 100, r.y + r.h * 68 / 100, r.w * 12 / 100, r.h * 12 / 100), white, r.w / 16);
 		break;
 	}
 }

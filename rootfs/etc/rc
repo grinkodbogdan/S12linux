@@ -16,5 +16,5 @@ dmesg -n 3
 ip link set lo up
 # The power button shuts down cleanly
 acpid -c /etc/acpi -l /run/acpid.log
-# Ethernet: an address from DHCP whenever a cable is plugged in
+# Network: Ethernet and Wi-Fi, with DHCP; also finds the data stick (s12-data)
 netd &

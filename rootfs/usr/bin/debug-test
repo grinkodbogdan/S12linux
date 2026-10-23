@@ -8,6 +8,7 @@
 # The log is written to /root/debug-test.txt, and to every USB stick or SD card with an ext2,
 # ext4 or FAT partition.
 
+export PATH=/usr/bin:/bin
 LOG=/root/debug-test.txt
 if [ "$1" = "--upload" ]; then
 	[ -s $LOG ] || { echo "No log yet: run debug-test first."; exit 1; }
@@ -43,7 +44,8 @@ save_usb() {
 	for p in /dev/sd?[0-9] /dev/mmcblk?p[0-9]; do
 		[ -e "$p" ] || continue
 		grep -q "^$p " /proc/mounts && continue
-		if mount "$p" /mnt/debug-test 2>/dev/null; then
+		T=$(blkid "$p" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+		if [ -n "$T" ] && mount -t $T "$p" /mnt/debug-test 2>/dev/null; then
 			# Skip read-only media, such as the boot stick
 			if cp $LOG /mnt/debug-test/s12-debug-test.txt 2>/dev/null; then
 				SAVED="$SAVED $p"
@@ -94,7 +96,7 @@ if [ -n "$SATA" ]; then
 else
 	say "       MISSING  8086:27c4  SATA controller (hard disk)"
 fi
-WIFI=$(echo "$PCI" | grep -i ' 14e4:43[0-9a-f][0-9a-f] \| 168c:\| 8086:42\| 8086:08' | head -1)
+WIFI=$(echo "$PCI" | grep -i ' 14e4:43[0-9a-f][0-9a-f] \| 168c:\| 8086:42\| 8086:08\| 8086:00\| 8086:4[0-9]\| 10ec:81\| 1814:' | head -1)
 [ -n "$WIFI" ] && say "       present  $(echo $WIFI | cut -d' ' -f2)  Wi-Fi card (driver: $(echo $WIFI | awk '{ print $5 }'))"
 say ""
 say "All PCI devices:"
@@ -281,7 +283,46 @@ else
 		na "Ethernet link" "no cable: network not tested"
 	fi
 fi
-[ -n "$WIFI" ] && na "Wi-Fi" "not supported yet"
+# Wi-Fi: the card (PCI or USB), its driver and firmware, the radio switch, networks in range
+WIF=""
+for d in /sys/class/net/*; do [ -e $d/phy80211 ] && { WIF=${d##*/}; break; }; done
+if [ -z "$WIF" ]; then
+	if [ -n "$WIFI" ]; then
+		bad "Wi-Fi card" "$(echo $WIFI | cut -d' ' -f2) has no driver: $(echo "$DMESG" | grep -i 'b43\|ssb\|bcma\|iwlwifi\|ath' | tail -2 | tr '\n' ' ')"
+	else
+		na "Wi-Fi card" "none found (a USB adapter works too)"
+	fi
+else
+	WDRV=$(basename "$(readlink /sys/class/net/$WIF/device/driver)" 2>/dev/null)
+	ok "Wi-Fi card" "$WIF, driver $WDRV$(read_file /sys/class/net/$WIF/phy80211/name | sed 's/^/, /')"
+	WLINE=$(read_file /run/net/status | grep "^$WIF ")
+	if echo "$WLINE" | grep -q radio-off; then
+		bad "Wi-Fi radio" "switched off (the switch on the front of the S12, or 'wifi on'): $(for r in /sys/class/rfkill/rfkill*; do echo "$(cat $r/name) soft $(cat $r/soft) hard $(cat $r/hard);"; done | tr '\n' ' ')"
+	elif echo "$WLINE" | grep -q no-firmware; then
+		bad "Wi-Fi firmware" "missing: run wifi-firmware (needs Ethernet once)"
+	else
+		ok "Wi-Fi radio" "on"
+		FW=$(echo "$DMESG" | grep -i "firmware" | grep -i "$WDRV\|$WIF" | tail -1)
+		[ -n "$FW" ] && say "       $FW"
+		NETS=$(wifi scan 2>&1)
+		if echo "$NETS" | grep -q '^wifi:'; then
+			bad "Wi-Fi scan" "$NETS"
+		else
+			N=$(echo "$NETS" | grep -c .)
+			[ "$N" -gt 0 ] && ok "Wi-Fi scan" "$N networks, strongest: $(echo "$NETS" | head -3 | awk -F '\t' '{ printf "%s (%s%%) ", $3, $1 }')" || bad "Wi-Fi scan" "no network found"
+		fi
+		WST=$(wifi status 2>&1)
+		echo "$WST" | grep -q connected && ! echo "$WST" | grep -q 'not connected' && ok "Wi-Fi connection" "$WST" || na "Wi-Fi connection" "$WST (connect with: wifi connect NAME PASSWORD)"
+	fi
+fi
+
+# Package manager and data stick
+if [ -d /data/s12linux ]; then
+	ok "Data stick" "$(grep ' /data ' /proc/mounts | cut -d' ' -f1)"
+else
+	na "Data stick" "none: settings are lost at reboot (s12-data setup)"
+fi
+say "       XBPS: $(ls /run/xbps/usr/bin 2>/dev/null | tr '\n' ' ')$(grep -h '^repository' /usr/share/xbps.d/*.conf /etc/xbps.d/*.conf 2>/dev/null | tr '\n' ' ')"
 
 # Dual core: both threads must do work. Two busy loops for 3 seconds, then the busy time of
 # each thread from /proc/stat (user + system, in hundredths of a second)
@@ -318,6 +359,11 @@ for f in /proc/cpuinfo /proc/meminfo /proc/stat /proc/interrupts /proc/iomem /pr
 done
 logcmd ip addr
 logcmd ip route
+# Wi-Fi networks, without their passwords: the log may be uploaded
+printf '\n----- /etc/wpa_supplicant.conf (passwords hidden)\n' >> $LOG
+sed 's/\(psk\|password\|wep_key[0-3]\|private_key_passwd\)=.*/\1=(hidden)/' /etc/wpa_supplicant.conf >> $LOG 2>&1
+[ -n "$WIF" ] && logcmd iw dev $WIF link && logcmd iw phy
+logcmd ls -lR /lib/firmware
 logcmd free
 logcmd df
 logcmd ps

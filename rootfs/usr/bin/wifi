@@ -1,0 +1,196 @@
+#!/bin/sh
+# Wi-Fi from the command line. The desktop's Wi-Fi window uses it too.
+#
+#   wifi                          state of the connection
+#   wifi scan                     networks in range, one per line: signal% security name
+#   wifi connect NAME [PASSWORD]  joins a network, and remembers it
+#   wifi forget NAME              forgets a network
+#   wifi saved                    remembered networks
+#   wifi disconnect               leaves the network (until the next connect)
+#   wifi on | off                 turns the radio on or off
+#   wifi country CODE             sets the country (two letters, e.g. GB): channels and power
+#
+# Networks are remembered in /etc/wpa_supplicant.conf, and on the data stick (see s12-data).
+
+export PATH=/usr/bin:/bin
+CONF=/etc/wpa_supplicant.conf
+SOCK=/run/wpa_supplicant
+
+IF=""
+for d in /sys/class/net/*; do
+	[ -e $d/phy80211 ] && { IF=${d##*/}; break; }
+done
+
+die() { echo "wifi: $*" >&2; exit 1; }
+cli() { wpa_cli -p $SOCK -i $IF "$@"; }
+
+# Waits for wpa_supplicant (started by netd), or explains why it is not running
+need_supplicant() {
+	[ -n "$IF" ] || die "no Wi-Fi card found (run debug-test for details)"
+	for i in 1 2 3 4 5; do
+		cli ping 2>/dev/null | grep -q PONG && return 0
+		sleep 1
+	done
+	if rfkill_blocked; then
+		die "the Wi-Fi radio is switched off: slide the wireless switch on the front of the S12, or run 'wifi on'"
+	fi
+	DRV=$(basename "$(readlink /sys/class/net/$IF/device/driver)" 2>/dev/null)
+	if [ "$DRV" = b43 ] && [ ! -d /lib/firmware/b43 ]; then
+		die "the Broadcom card needs its firmware: run 'wifi-firmware' (needs Ethernet once)"
+	fi
+	die "wpa_supplicant does not answer on $IF: see 'dmesg | grep -i wlan'"
+}
+
+rfkill_blocked() {
+	for r in /sys/class/rfkill/rfkill*; do
+		[ "$(cat $r/type 2>/dev/null)" = wlan ] || continue
+		[ "$(cat $r/soft)" = 1 ] || [ "$(cat $r/hard)" = 1 ] && return 0
+	done
+	return 1
+}
+
+# Network id of a remembered network, by name
+network_id() {
+	cli list_networks | tail -n +2 | while IFS="$(printf '\t')" read id ssid bssid flags; do
+		[ "$ssid" = "$1" ] && { echo $id; break; }
+	done
+}
+
+hex() { printf '%s' "$1" | hexdump -v -e '/1 "%02x"'; }
+
+save() {
+	cli save_config > /dev/null
+	command -v s12-data > /dev/null && s12-data save --quiet
+}
+
+case "$1" in
+"" | status)
+	[ -n "$IF" ] || die "no Wi-Fi card found (run debug-test for details)"
+	if rfkill_blocked; then
+		echo "$IF: radio off"
+		exit 0
+	fi
+	need_supplicant
+	ST=$(cli status)
+	STATE=$(echo "$ST" | sed -n 's/^wpa_state=//p')
+	SSID=$(echo "$ST" | sed -n 's/^ssid=//p')
+	ADDR=$(echo "$ST" | sed -n 's/^ip_address=//p')
+	SIG=$(cli signal_poll 2>/dev/null | sed -n 's/^RSSI=//p')
+	case "$STATE" in
+	COMPLETED) echo "$IF: connected to $SSID${ADDR:+, address $ADDR}${SIG:+, signal $SIG dBm}" ;;
+	SCANNING | ASSOCIATING | ASSOCIATED | AUTHENTICATING | 4WAY_HANDSHAKE | GROUP_HANDSHAKE)
+		echo "$IF: connecting${SSID:+ to $SSID} ($STATE)" ;;
+	*) echo "$IF: not connected" ;;
+	esac
+	;;
+scan)
+	need_supplicant
+	cli scan > /dev/null
+	# Results come within a few seconds; the first scan after the card starts takes longer
+	sleep 3
+	for i in 1 2 3 4; do
+		[ $(cli scan_results | wc -l) -gt 1 ] && break
+		sleep 2
+	done
+	# bssid freq signal flags ssid -> signal% security ssid, the strongest of each name first
+	cli scan_results | tail -n +2 | awk -F '\t' '
+		$5 != "" && $5 !~ /^\\x00/ {
+			q = 2 * ($3 + 100); if (q > 100) q = 100; if (q < 0) q = 0
+			sec = "open"
+			if ($4 ~ /WEP/) sec = "wep"
+			if ($4 ~ /WPA/) sec = "wpa"
+			if ($4 ~ /EAP/) sec = "enterprise"
+			if ($4 ~ /SAE/ && $4 !~ /PSK/) sec = "wpa3"
+			if (!($5 in best) || q > best[$5]) { best[$5] = q; s[$5] = sec }
+		}
+		END { for (n in best) printf "%d\t%s\t%s\n", best[n], s[n], n }' | sort -rn
+	;;
+connect)
+	[ -n "$2" ] || die "usage: wifi connect NAME [PASSWORD]"
+	need_supplicant
+	NAME=$2 PASS=$3
+	ID=$(network_id "$NAME")
+	[ -n "$ID" ] || ID=$(cli add_network | tail -1)
+	cli set_network $ID ssid "$(hex "$NAME")" > /dev/null
+	cli set_network $ID scan_ssid 1 > /dev/null
+	if [ -n "$PASS" ]; then
+		LEN=$(printf '%s' "$PASS" | wc -c)
+		if [ $LEN -ge 8 ] && [ $LEN -le 63 ]; then
+			cli set_network $ID key_mgmt "WPA-PSK WPA-PSK-SHA256" > /dev/null
+			cli set_network $ID psk "\"$PASS\"" > /dev/null || die "the password was not accepted"
+		elif [ $LEN -eq 64 ]; then
+			cli set_network $ID key_mgmt WPA-PSK > /dev/null
+			cli set_network $ID psk "$PASS" > /dev/null
+		else
+			# 5 or 13 characters: an old WEP network
+			cli set_network $ID key_mgmt NONE > /dev/null
+			cli set_network $ID wep_key0 "\"$PASS\"" > /dev/null || die "a WPA password has 8 to 63 characters"
+		fi
+	else
+		cli set_network $ID key_mgmt NONE > /dev/null
+	fi
+	cli enable_network $ID > /dev/null
+	cli select_network $ID > /dev/null
+	echo "Connecting to $NAME..."
+	for i in $(seq 1 25); do
+		STATE=$(cli status | sed -n 's/^wpa_state=//p')
+		if [ "$STATE" = COMPLETED ]; then
+			# Every network stays usable, not only the last one selected
+			for n in $(cli list_networks | tail -n +2 | cut -f1); do cli enable_network $n > /dev/null; done
+			save
+			echo "Connected to $NAME. The address comes from DHCP in a few seconds."
+			exit 0
+		fi
+		sleep 1
+	done
+	for n in $(cli list_networks | tail -n +2 | cut -f1); do cli enable_network $n > /dev/null; done
+	save
+	die "could not connect to $NAME (wrong password, or the network is out of range). It is remembered: it connects when it can."
+	;;
+forget)
+	[ -n "$2" ] || die "usage: wifi forget NAME"
+	need_supplicant
+	ID=$(network_id "$2")
+	[ -n "$ID" ] || die "$2 is not remembered"
+	cli remove_network $ID > /dev/null
+	save
+	echo "Forgot $2."
+	;;
+saved)
+	need_supplicant
+	cli list_networks | tail -n +2 | cut -f2
+	;;
+disconnect)
+	need_supplicant
+	cli disconnect > /dev/null && echo "Disconnected. 'wifi connect NAME' or a reboot connects again."
+	;;
+on | off)
+	V=0
+	[ "$1" = off ] && V=1
+	FOUND=0
+	for r in /sys/class/rfkill/rfkill*; do
+		[ "$(cat $r/type 2>/dev/null)" = wlan ] || continue
+		echo $V > $r/soft && FOUND=1
+		[ "$1" = on ] && [ "$(cat $r/hard)" = 1 ] && echo "The wireless switch on the front of the S12 is off: slide it on."
+	done
+	[ $FOUND = 1 ] || die "no Wi-Fi radio found"
+	echo "Wi-Fi radio $1."
+	;;
+country)
+	echo "$2" | grep -qx '[A-Za-z][A-Za-z]' || die "usage: wifi country CODE (two letters, e.g. GB, US, DE)"
+	C=$(echo "$2" | tr a-z A-Z)
+	if grep -q '^country=' $CONF; then
+		sed -i "s/^country=.*/country=$C/" $CONF
+	else
+		sed -i "2i country=$C" $CONF
+	fi
+	need_supplicant
+	cli set country $C > /dev/null
+	save
+	echo "Country set to $C."
+	;;
+*)
+	sed -n '2,13s/^# \{0,1\}//p' "$0"
+	exit 1
+	;;
+esac

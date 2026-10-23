@@ -1,0 +1,49 @@
+#!/bin/sh
+# Installs the firmware of Broadcom Wi-Fi cards (BCM4312 in most IdeaPad S12s, and other cards
+# of the b43 driver). Broadcom does not allow it to be distributed, so it is extracted here from
+# Broadcom's own driver with b43-fwcutter, as Debian's firmware-b43-installer does.
+#
+# usage: wifi-firmware           downloads the driver (13 MB, needs Ethernet), extracts it
+#        wifi-firmware FILE      uses broadcom-wl-5.100.138.tar.bz2 from a USB stick instead
+#
+# The firmware is saved on the data stick if there is one (see s12-data), and installed again
+# from it at every boot.
+
+export PATH=/usr/bin:/bin
+NAME=broadcom-wl-5.100.138.tar.bz2
+SHA256=f1e7067aac5b62b67b8b6e4c517990277804339ac16065eb13c731ff909ae46f
+MIRRORS="https://www.lwfinger.com/b43-firmware/$NAME https://sources.openwrt.org/$NAME"
+
+set -e
+TMP=$(mktemp -d /tmp/wifi-firmware.XXXXXX)
+trap 'rm -rf $TMP' EXIT
+
+if [ -n "$1" ]; then
+	cp "$1" $TMP/$NAME
+else
+	for url in $MIRRORS; do
+		echo "Downloading $url"
+		if curl -fL --connect-timeout 15 -o $TMP/$NAME "$url"; then
+			break
+		fi
+		rm -f $TMP/$NAME
+	done
+	[ -s $TMP/$NAME ] || { echo "The download failed: is the Ethernet cable plugged in? (cat /run/net/status)"; exit 1; }
+fi
+echo "$SHA256  $TMP/$NAME" | sha256sum -c --quiet - || { echo "This is not the expected file ($NAME)."; exit 1; }
+echo "Extracting the firmware..."
+tar xjf $TMP/$NAME -C $TMP broadcom-wl-5.100.138/linux/wl_apsta.o
+mkdir -p /lib/firmware
+b43-fwcutter -w /lib/firmware $TMP/broadcom-wl-5.100.138/linux/wl_apsta.o > /dev/null
+echo "Installed $(ls /lib/firmware/b43 | wc -l) firmware files in /lib/firmware/b43."
+if command -v s12-data > /dev/null && s12-data save --quiet; then
+	:
+else
+	echo "Tip: with a data stick (s12-data setup), the firmware is kept for the next boots."
+fi
+# The card starts within a few seconds (netd brings it up)
+for d in /sys/class/net/*; do
+	[ -e $d/phy80211 ] || continue
+	[ "$(basename "$(readlink $d/device/driver)")" = b43 ] && ip link set ${d##*/} up 2> /dev/null || true
+done
+echo "Done. Choose a network with 'wifi scan' and 'wifi connect NAME PASSWORD', or in Menu > Wi-Fi."

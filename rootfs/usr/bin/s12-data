@@ -1,0 +1,111 @@
+#!/bin/sh
+# Keeps data across reboots on a USB stick, SD card or disk partition: Wi-Fi networks, Wi-Fi
+# firmware and the packages installed with xbps-install. S12 Linux runs from RAM, so without it
+# everything is gone after a reboot.
+#
+#   s12-data                     where the data is kept
+#   s12-data setup [PARTITION]   uses this partition (FAT, ext2/3/4), e.g. /dev/sdb1
+#   s12-data save                saves the current Wi-Fi networks and firmware now
+#
+# The data is in a folder "s12linux" on that partition. At boot, netd looks for it and mounts
+# the partition on /data (called as "s12-data mount").
+
+export PATH=/usr/bin:/bin
+MNT=/data
+DIR=$MNT/s12linux
+QUIET=0
+[ "$2" = --quiet ] && QUIET=1
+say() { [ $QUIET = 1 ] || echo "$*"; }
+
+mounted() { grep -q " $MNT " /proc/mounts && [ -d $DIR ]; }
+
+# Mounts a partition, with its file system type from blkid (mount does not guess it reliably)
+mount_part() {
+	T=$(blkid "$1" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+	case "$T" in vfat | ext2 | ext3 | ext4 | exfat) ;; *) return 1 ;; esac
+	mount -t $T "$1" $MNT
+}
+
+partitions() {
+	for p in /dev/sd[a-z][0-9]* /dev/mmcblk[0-9]p[0-9]*; do
+		[ -b "$p" ] || continue
+		# Skip the boot stick, which is read-only
+		grep -q "^$p " /proc/mounts && continue
+		echo $p
+	done
+}
+
+# Copies the data into the running system
+restore() {
+	if [ -d $DIR/firmware ]; then
+		mkdir -p /lib/firmware
+		cp -a $DIR/firmware/. /lib/firmware/
+	fi
+	if [ -s $DIR/wpa_supplicant.conf ]; then
+		cp $DIR/wpa_supplicant.conf /etc/wpa_supplicant.conf
+		for s in /run/wpa_supplicant/*; do
+			[ -S "$s" ] && wpa_cli -p /run/wpa_supplicant -i ${s##*/} reconfigure > /dev/null 2>&1
+		done
+	fi
+	mkdir -p $DIR/xbps-cache /etc/xbps.d
+	echo "cachedir=$DIR/xbps-cache" > /etc/xbps.d/10-s12-data-cache.conf
+}
+
+case "$1" in
+mount)
+	mounted && exit 0
+	mkdir -p $MNT
+	for p in $(partitions); do
+		mount_part "$p" 2> /dev/null || continue
+		if [ -d $DIR ] && touch $DIR/.writable 2> /dev/null; then
+			rm -f $DIR/.writable
+			restore
+			echo "s12-data: using $p" > /dev/kmsg
+			exit 0
+		fi
+		umount $MNT
+	done
+	exit 1
+	;;
+setup)
+	if mounted; then
+		say "Data is already kept on $(grep " $MNT " /proc/mounts | cut -d' ' -f1)."
+		exit 0
+	fi
+	P=$2
+	if [ -z "$P" ]; then
+		P=$(partitions | head -1)
+		[ -n "$P" ] || { echo "No USB stick or SD card found: plug one in (FAT or ext4), then run s12-data setup."; exit 1; }
+	fi
+	mkdir -p $MNT
+	mount_part "$P" || { echo "Cannot mount $P: use a FAT or ext4 partition."; exit 1; }
+	mkdir -p $DIR || { umount $MNT; echo "$P is not writable."; exit 1; }
+	restore
+	"$0" save --quiet
+	echo "Data is now kept in the folder s12linux on $P: Wi-Fi networks, firmware and packages."
+	;;
+save)
+	mounted || exit 1
+	[ -s /etc/wpa_supplicant.conf ] && cp /etc/wpa_supplicant.conf $DIR/wpa_supplicant.conf
+	if [ -d /lib/firmware/b43 ]; then
+		mkdir -p $DIR/firmware
+		cp -a /lib/firmware/b43 $DIR/firmware/
+	fi
+	sync
+	say "Saved on $(grep " $MNT " /proc/mounts | cut -d' ' -f1)."
+	;;
+"")
+	if mounted; then
+		echo "Data is kept in s12linux on $(grep " $MNT " /proc/mounts | cut -d' ' -f1):"
+		[ -s $DIR/wpa_supplicant.conf ] && echo "  Wi-Fi networks: $(grep -c '^[[:space:]]*ssid=' $DIR/wpa_supplicant.conf)"
+		[ -d $DIR/firmware/b43 ] && echo "  Broadcom Wi-Fi firmware"
+		[ -s $DIR/packages ] && echo "  packages: $(tr '\n' ' ' < $DIR/packages)"
+	else
+		echo "Data is not kept: everything is lost at reboot. Run 's12-data setup' with a USB stick or SD card."
+	fi
+	;;
+*)
+	sed -n '2,12s/^# \{0,1\}//p' "$0"
+	exit 1
+	;;
+esac

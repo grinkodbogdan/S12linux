@@ -1,0 +1,88 @@
+#!/bin/sh
+# Runs an XBPS tool (xbps-install, xbps-query, xbps-remove...): Void Linux's package manager,
+# with Void's i686 repository. The tools are large, so they are not kept in RAM at boot: the
+# first use unpacks the one needed, from the boot stick, the data stick, or Void's server.
+#
+# Packages go to RAM like the rest of the system. With a data stick (s12-data setup), the
+# packages installed are remembered and installed again after a reboot, from the cache on it.
+
+export PATH=/usr/bin:/bin
+TOOL=${0##*/}
+DIR=/run/xbps
+BIN=$DIR/usr/bin/$TOOL.static
+TARBALL=xbps-static-latest.i686-musl.tar.xz
+URL=https://repo-default.voidlinux.org/static
+DATA=/data/s12linux
+
+# Finds the static XBPS archive: boot stick, data stick, or a download (checked against Void's list)
+find_tarball() {
+	[ -s $DIR/$TARBALL ] && { echo $DIR/$TARBALL; return; }
+	[ -s $DATA/$TARBALL ] && { echo $DATA/$TARBALL; return; }
+	mkdir -p /run/boot
+	if ! grep -q " /run/boot " /proc/mounts; then
+		for d in /dev/sr[0-9] /dev/sd[a-z]; do
+			[ -b $d ] || continue
+			mount -t iso9660 -o ro $d /run/boot 2> /dev/null || continue
+			[ -s /run/boot/s12/$TARBALL ] && break
+			umount /run/boot
+		done
+	fi
+	[ -s /run/boot/s12/$TARBALL ] && { echo /run/boot/s12/$TARBALL; return; }
+	echo "Downloading XBPS from $URL..." >&2
+	curl -fsSL -o $DIR/$TARBALL.part "$URL/$TARBALL" || return 1
+	SUM=$(curl -fsSL "$URL/sha256sums.txt" | awk -v f=$TARBALL '$2 == f { print $1 }')
+	echo "$SUM  $DIR/$TARBALL.part" | sha256sum -c --quiet - || { rm -f $DIR/$TARBALL.part; return 1; }
+	mv $DIR/$TARBALL.part $DIR/$TARBALL
+	echo $DIR/$TARBALL
+}
+
+if [ ! -x $BIN ]; then
+	mkdir -p $DIR
+	T=$(find_tarball) || { echo "$TOOL: XBPS is not available: no boot stick, and no network to download it" >&2; exit 1; }
+	tar xJf "$T" -C $DIR ./usr/bin/$TOOL.static 2> /dev/null || tar xJf "$T" -C $DIR usr/bin/$TOOL.static
+	[ -x $BIN ] || { echo "$TOOL: not found in $T" >&2; exit 1; }
+	# The data stick keeps a copy, for use without the boot stick
+	[ -d $DATA ] && [ ! -s $DATA/$TARBALL ] && cp "$T" $DATA/ 2> /dev/null
+fi
+
+case $TOOL in
+xbps-install | xbps-remove) ;;
+*) exec $BIN "$@" ;;
+esac
+
+# Void's package scripts need xbps-triggers, which a Void system always has: it is added to the
+# first installation
+if [ $TOOL = xbps-install ] && ! grep -qs '<key>xbps-triggers</key>' /var/db/xbps/pkgdb-0.38.plist; then
+	for a in "$@"; do
+		case "$a" in -*) ;; *) set -- "$@" xbps-triggers; break ;; esac
+	done
+fi
+
+$BIN "$@"
+RC=$?
+[ $RC = 0 ] || exit $RC
+# Documentation takes RAM and is not needed here
+rm -rf /usr/share/man /usr/share/info /usr/share/doc /usr/share/gtk-doc 2> /dev/null
+# Remembers the packages installed by hand, on the data stick
+if [ -d $DATA ]; then
+	NAMES=""
+	SKIP=0
+	for a in "$@"; do
+		case "$a" in
+		-r | -c | -C | -R | --rootdir | --cachedir | --config | --repository) SKIP=1; continue ;;
+		-*) continue ;;
+		esac
+		[ $SKIP = 1 ] && { SKIP=0; continue; }
+		NAMES="$NAMES $a"
+	done
+	touch $DATA/packages
+	for n in $NAMES; do
+		if [ $TOOL = xbps-install ]; then
+			grep -qx "$n" $DATA/packages || echo "$n" >> $DATA/packages
+		else
+			sed -i "/^$n\$/d" $DATA/packages
+		fi
+	done
+	sync
+fi
+exit 0
