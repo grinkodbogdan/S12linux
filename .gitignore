@@ -1,0 +1,7 @@
+work/
+*.iso
+*.o
+/desk/desk
+/desk/minit
+/desk/soundtest
+/desk/desk-host

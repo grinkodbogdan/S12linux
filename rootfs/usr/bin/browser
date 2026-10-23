@@ -1,0 +1,3 @@
+#!/bin/sh
+# Starts the web browser on the screen. Ctrl+Q quits.
+exec /usr/bin/netsurf-fb -f linux "$@"

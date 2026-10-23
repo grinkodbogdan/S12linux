@@ -1,0 +1,11 @@
+homepage_url:about:welcome
+ca_bundle:/etc/ssl/certs/ca-certificates.crt
+enable_javascript:1
+font_size:120
+font_min_size:90
+fb_font_monochrome:0
+fb_font_cachesize:4096
+memory_cache_size:16777216
+max_fetchers:8
+max_fetchers_per_host:4
+suppress_curl_debug:1

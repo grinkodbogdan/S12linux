@@ -1,0 +1,3 @@
+#!/bin/sh
+# Lid: nothing for now (no sleep support yet)
+exit 0

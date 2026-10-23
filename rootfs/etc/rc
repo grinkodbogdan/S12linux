@@ -1,0 +1,20 @@
+#!/bin/sh
+# Starts the system: file systems, console, power button, network.
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+# The kernel does not mount /dev itself when it starts from an initramfs
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o size=8m,mode=755 tmpfs /run
+mount -t tmpfs tmpfs /tmp
+mkdir -p /run/net
+hostname -F /etc/hostname
+# Only errors from the kernel on the screen; everything stays in dmesg
+dmesg -n 3
+ip link set lo up
+# The power button shuts down cleanly
+acpid -c /etc/acpi -l /run/acpid.log
+# Ethernet: an address from DHCP whenever a cable is plugged in
+netd &

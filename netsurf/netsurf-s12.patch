@@ -1,0 +1,650 @@
+--- a/libnsfb/src/surface/surface.c
++++ b/libnsfb/src/surface/surface.c
+@@ -28,13 +28,20 @@
+ static struct nsfb_surface_s surfaces[MAX_SURFACES];
+ static int surface_count = 0;
+ 
++void nsfb_register_builtin_surfaces(void);
++
+ /* internal routine which lets surfaces register their presence at runtime */
+ void _nsfb_register_surface(const enum nsfb_type_e type, 
+                              const nsfb_surface_rtns_t *rtns, 
+                              const char *name)
+ {
++    int i;
+     if (surface_count >= MAX_SURFACES)
+         return; /* no space for additional surfaces */
++    /* Surfaces may be registered both by constructors and explicitly */
++    for (i = 0; i < surface_count; i++)
++        if (surfaces[i].rtns == rtns)
++            return;
+ 
+     surfaces[surface_count].type = type;
+     surfaces[surface_count].rtns = rtns;
+@@ -89,6 +96,8 @@
+ nsfb_surface_get_rtns(enum nsfb_type_e type)
+ {
+     int fend_loop;
++
++    nsfb_register_builtin_surfaces();
+     nsfb_surface_rtns_t *rtns = NULL;
+ 
+     for (fend_loop = 0; fend_loop < surface_count; fend_loop++) {
+@@ -144,6 +153,8 @@
+ {
+     int fend_loop;
+ 
++    nsfb_register_builtin_surfaces();
++
+     for (fend_loop = 0; fend_loop < surface_count; fend_loop++) {
+         if (strcmp(surfaces[fend_loop].name, name) == 0)
+             return surfaces[fend_loop].type;
+@@ -157,6 +168,8 @@
+ {
+     int fend_loop;
+ 
++    nsfb_register_builtin_surfaces();
++
+     for (fend_loop = 0; fend_loop < surface_count; fend_loop++) {
+ 	cb(context, surfaces[fend_loop].name, surfaces[fend_loop].type);
+     }
+@@ -168,3 +181,13 @@
+  *  tab-width: 8
+  * End:
+  */
++
++/* Explicit registration of the built-in surfaces: in static programs, the constructors of
++ * surfaces that are not otherwise referenced are not linked in. */
++void nsfb_add_ram(void);
++void nsfb_add_linux(void);
++void nsfb_register_builtin_surfaces(void)
++{
++    nsfb_add_ram();
++    nsfb_add_linux();
++}
+--- a/libnsfb/src/surface/ram.c
++++ b/libnsfb/src/surface/ram.c
+@@ -135,3 +135,6 @@
+  *  tab-width: 8
+  * End:
+  */
++
++/* Explicit registration, see surface.c */
++void nsfb_add_ram(void) { ram_register_surface(); }
+--- a/libnsfb/src/surface/Makefile
++++ b/libnsfb/src/surface/Makefile
+@@ -1,7 +1,7 @@
+ # Sources
+ 
+ # Common surface code and heap based surface handler
+-SURFACE_HANDLER_yes := surface.c ram.c
++SURFACE_HANDLER_yes := surface.c ram.c s12fb.c
+ 
+ # optional surface handlers
+ SURFACE_HANDLER_$(NSFB_SDL_AVAILABLE) += sdl.c
+--- a/netsurf/frontends/framebuffer/gui.c
++++ b/netsurf/frontends/framebuffer/gui.c
+@@ -859,6 +859,18 @@
+ 	case NSFB_EVENT_KEY_DOWN:
+ 		switch (cbi->event->value.keycode) {
+ 
++		case NSFB_KEY_l:
++			/* Ctrl + L: type an address */
++			if ((modifier & (FBTK_MOD_RCTRL | FBTK_MOD_LCTRL)) &&
++			    gw->url != NULL) {
++				fbtk_set_text(gw->url, "");
++				fbtk_set_focus(gw->url);
++				break;
++			}
++			browser_window_key_press(gw->bw, fbtk_keycode_to_ucs4(
++					cbi->event->value.keycode, modifier));
++			break;
++
+ 		case NSFB_KEY_DELETE:
+ 			browser_window_key_press(gw->bw, NS_KEY_DELETE_RIGHT);
+ 			break;
+@@ -1176,6 +1188,14 @@
+ 		nsurl_unref(url);
+ 	}
+ 
++	/* Keys now go to the page, for scrolling */
++	for (struct gui_window *gw = window_list; gw != NULL; gw = gw->next) {
++		if (gw->bw == bw && gw->browser != NULL) {
++			fbtk_set_focus(gw->browser);
++			break;
++		}
++	}
++
+ 	return 0;
+ }
+ 
+--- a/libnsfb/src/surface/s12fb.c
++++ b/libnsfb/src/surface/s12fb.c
+@@ -0,0 +1,527 @@
++/*
++ * Copyright 2026 The NetSurf Browser Project.
++ *
++ * This file is part of libnsfb, http://www.netsurf-browser.org/
++ * Licenced under the MIT License,
++ *                http://www.opensource.org/licenses/mit-license.php
++ */
++
++/* Linux framebuffer surface, as provided by S12 Linux: the screen is the 32 bits per pixel
++ * /dev/fb0, the keyboard is the terminal in raw mode (characters and escape sequences), and the
++ * mouse is /dev/input/mice (PS/2 packets).
++ *
++ * Drawing happens in memory, and updated areas are copied to the screen: reading the
++ * framebuffer itself, which is write-combined, would be slow.
++ */
++
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <termios.h>
++#include <unistd.h>
++#include <linux/fb.h>
++#include <linux/kd.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++
++#include "libnsfb.h"
++#include "libnsfb_event.h"
++#include "libnsfb_plot.h"
++#include "libnsfb_plot_util.h"
++
++#include "cursor.h"
++#include "nsfb.h"
++#include "plot.h"
++#include "surface.h"
++
++#define QUEUE_LEN 64
++
++struct s12fb_priv {
++	int fb_fd, tty_fd, kbd_fd, mouse_fd;
++	uint8_t *fb;
++	size_t fb_size;
++	int fb_pitch;
++	int rshift, gshift, bshift;
++	struct termios saved;
++	bool saved_ok;
++	int saved_kd_mode;
++	/* The copy plotter of the memory surface */
++	bool (*mem_copy)(nsfb_t *nsfb, nsfb_bbox_t *srcbox, nsfb_bbox_t *dstbox);
++	/* Pending events */
++	nsfb_event_t queue[QUEUE_LEN];
++	int q_head, q_len;
++	/* Partial escape sequence */
++	char esc[16];
++	int esc_len;
++	int buttons;
++};
++
++static void push(struct s12fb_priv *p, enum nsfb_event_type_e type, int code)
++{
++	if (p->q_len == QUEUE_LEN)
++		return;
++	nsfb_event_t *e = &p->queue[(p->q_head + p->q_len) % QUEUE_LEN];
++	memset(e, 0, sizeof(*e));
++	e->type = type;
++	e->value.keycode = code;
++	p->q_len++;
++}
++
++static void push_move(struct s12fb_priv *p, int dx, int dy)
++{
++	/* Merge with a pending movement */
++	if (p->q_len > 0) {
++		nsfb_event_t *last = &p->queue[(p->q_head + p->q_len - 1) % QUEUE_LEN];
++		if (last->type == NSFB_EVENT_MOVE_RELATIVE) {
++			last->value.vector.x += dx;
++			last->value.vector.y += dy;
++			return;
++		}
++	}
++	if (p->q_len == QUEUE_LEN)
++		return;
++	nsfb_event_t *e = &p->queue[(p->q_head + p->q_len) % QUEUE_LEN];
++	memset(e, 0, sizeof(*e));
++	e->type = NSFB_EVENT_MOVE_RELATIVE;
++	e->value.vector.x = dx;
++	e->value.vector.y = dy;
++	p->q_len++;
++}
++
++/* A key press, with modifiers held around it */
++static void push_key(struct s12fb_priv *p, int code, bool shift, bool ctrl)
++{
++	if (ctrl)
++		push(p, NSFB_EVENT_KEY_DOWN, NSFB_KEY_LCTRL);
++	if (shift)
++		push(p, NSFB_EVENT_KEY_DOWN, NSFB_KEY_LSHIFT);
++	push(p, NSFB_EVENT_KEY_DOWN, code);
++	push(p, NSFB_EVENT_KEY_UP, code);
++	if (shift)
++		push(p, NSFB_EVENT_KEY_UP, NSFB_KEY_LSHIFT);
++	if (ctrl)
++		push(p, NSFB_EVENT_KEY_UP, NSFB_KEY_LCTRL);
++}
++
++/* Characters typed with shift on a US keyboard, with the unshifted key */
++static const char shifted[] = "~`!1@2#3$4%5^6&7*8(9)0_-+={[}]|\\:;\"'<,>.?/";
++
++/* Handles a complete escape sequence. Returns false if it is not complete yet. */
++static bool escape(struct s12fb_priv *p)
++{
++	const char *s = p->esc;
++	int n = p->esc_len;
++	if (n < 2)
++		return false;
++	if (s[1] != '[' && s[1] != 'O') {
++		/* Alt + key: give the key */
++		push(p, NSFB_EVENT_KEY_DOWN, NSFB_KEY_ESCAPE);
++		push(p, NSFB_EVENT_KEY_UP, NSFB_KEY_ESCAPE);
++		return true;
++	}
++	if (n < 3)
++		return false;
++	char last = s[n - 1];
++	if (!((last >= 'A' && last <= 'Z') || (last >= 'a' && last <= 'z') || last == '~'))
++		return n >= (int)sizeof(p->esc) - 1;
++	/* Modifiers, as in "ESC [ 1 ; 5 C" */
++	int mod = 1;
++	const char *semi = memchr(s, ';', n);
++	if (semi)
++		mod = atoi(semi + 1);
++	bool shift = (mod - 1) & 1, ctrl = (mod - 1) & 4;
++	int num = atoi(s + 2);
++	int code = 0;
++	switch (last) {
++	case 'A': code = NSFB_KEY_UP; break;
++	case 'B': code = NSFB_KEY_DOWN; break;
++	case 'C': code = NSFB_KEY_RIGHT; break;
++	case 'D': code = NSFB_KEY_LEFT; break;
++	case 'H': code = NSFB_KEY_HOME; break;
++	case 'F': code = NSFB_KEY_END; break;
++	case 'P': code = NSFB_KEY_F1; break;
++	case 'Q': code = NSFB_KEY_F2; break;
++	case 'R': code = NSFB_KEY_F3; break;
++	case 'S': code = NSFB_KEY_F4; break;
++	case 'Z': code = NSFB_KEY_TAB; shift = true; break;
++	case '~':
++		switch (num) {
++		case 1: case 7: code = NSFB_KEY_HOME; break;
++		case 2: code = NSFB_KEY_INSERT; break;
++		case 3: code = NSFB_KEY_DELETE; break;
++		case 4: case 8: code = NSFB_KEY_END; break;
++		case 5: code = NSFB_KEY_PAGEUP; break;
++		case 6: code = NSFB_KEY_PAGEDOWN; break;
++		case 11: code = NSFB_KEY_F1; break;
++		case 12: code = NSFB_KEY_F2; break;
++		case 13: code = NSFB_KEY_F3; break;
++		case 14: code = NSFB_KEY_F4; break;
++		case 15: code = NSFB_KEY_F5; break;
++		case 17: code = NSFB_KEY_F6; break;
++		case 18: code = NSFB_KEY_F7; break;
++		case 19: code = NSFB_KEY_F8; break;
++		case 20: code = NSFB_KEY_F9; break;
++		case 21: code = NSFB_KEY_F10; break;
++		case 23: code = NSFB_KEY_F11; break;
++		case 24: code = NSFB_KEY_F12; break;
++		}
++		break;
++	}
++	if (s[1] == '[' && s[2] == '[') {
++		/* Linux console function keys: ESC [ [ A to E */
++		if (last >= 'A' && last <= 'E')
++			code = NSFB_KEY_F1 + (last - 'A');
++	}
++	if (code)
++		push_key(p, code, shift, ctrl);
++	return true;
++}
++
++static void key_char(struct s12fb_priv *p, unsigned char c)
++{
++	if (p->esc_len > 0) {
++		if (p->esc_len < (int)sizeof(p->esc) - 1)
++			p->esc[p->esc_len++] = c;
++		if (escape(p))
++			p->esc_len = 0;
++		return;
++	}
++	if (c == 27) {
++		p->esc[0] = c;
++		p->esc_len = 1;
++		return;
++	}
++	if (c == 17) {
++		/* Ctrl + Q: quit */
++		push(p, NSFB_EVENT_CONTROL, NSFB_CONTROL_QUIT);
++		return;
++	}
++	if (c == '\r' || c == '\n') {
++		push_key(p, NSFB_KEY_RETURN, false, false);
++	} else if (c == '\t') {
++		push_key(p, NSFB_KEY_TAB, false, false);
++	} else if (c == 127 || c == 8) {
++		push_key(p, NSFB_KEY_BACKSPACE, false, false);
++	} else if (c < 32) {
++		/* Ctrl + letter */
++		push_key(p, NSFB_KEY_a + c - 1, false, true);
++	} else if (c >= 'A' && c <= 'Z') {
++		push_key(p, NSFB_KEY_a + (c - 'A'), true, false);
++	} else if (c >= 0x80) {
++		/* Bytes of UTF-8 characters are not keys */
++	} else {
++		const char *sh = strchr(shifted, c);
++		if (sh && ((sh - shifted) & 1) == 0)
++			push_key(p, (unsigned char)sh[1], true, false);
++		else
++			push_key(p, c, false, false);
++	}
++}
++
++/* Pending escape sequences are flushed when no more bytes come: Escape itself */
++static void flush_escape(struct s12fb_priv *p)
++{
++	if (p->esc_len == 1) {
++		push_key(p, NSFB_KEY_ESCAPE, false, false);
++		p->esc_len = 0;
++	}
++}
++
++static void read_keys(struct s12fb_priv *p)
++{
++	unsigned char buf[256];
++	ssize_t n;
++	while ((n = read(p->kbd_fd, buf, sizeof(buf))) > 0) {
++		for (ssize_t i = 0; i < n; i++)
++			key_char(p, buf[i]);
++	}
++}
++
++static void read_mouse(struct s12fb_priv *p)
++{
++	unsigned char b[3];
++	while (read(p->mouse_fd, b, 3) == 3) {
++		if (!(b[0] & 0x08))
++			continue;
++		int dx = b[1] - ((b[0] << 4) & 0x100);
++		int dy = b[2] - ((b[0] << 3) & 0x100);
++		/* Acceleration, as in the desktop */
++		int speed = abs(dx) + abs(dy);
++		if (speed > 24) {
++			dx *= 2;
++			dy *= 2;
++		} else if (speed > 10) {
++			dx = dx * 3 / 2;
++			dy = dy * 3 / 2;
++		}
++		if (dx || dy)
++			push_move(p, dx, -dy);
++		static const int codes[3] = {NSFB_KEY_MOUSE_1, NSFB_KEY_MOUSE_3, NSFB_KEY_MOUSE_2};
++		for (int i = 0; i < 3; i++) {
++			int down = b[0] & (1 << i);
++			if (down && !(p->buttons & (1 << i)))
++				push(p, NSFB_EVENT_KEY_DOWN, codes[i]);
++			else if (!down && (p->buttons & (1 << i)))
++				push(p, NSFB_EVENT_KEY_UP, codes[i]);
++		}
++		p->buttons = b[0] & 7;
++	}
++}
++
++/* Copies an area of the memory surface to the screen */
++static void flush(nsfb_t *nsfb, nsfb_bbox_t *box)
++{
++	struct s12fb_priv *p = nsfb->surface_priv;
++	int x0 = box->x0 < 0 ? 0 : box->x0, y0 = box->y0 < 0 ? 0 : box->y0;
++	int x1 = box->x1 > nsfb->width ? nsfb->width : box->x1;
++	int y1 = box->y1 > nsfb->height ? nsfb->height : box->y1;
++	if (x1 <= x0 || y1 <= y0 || p->fb == NULL)
++		return;
++	bool native = p->rshift == 16 && p->gshift == 8 && p->bshift == 0;
++	for (int y = y0; y < y1; y++) {
++		uint32_t *src = (uint32_t *)(nsfb->ptr + y * nsfb->linelen) + x0;
++		uint32_t *dst = (uint32_t *)(p->fb + y * p->fb_pitch) + x0;
++		if (native) {
++			memcpy(dst, src, (x1 - x0) * 4);
++			continue;
++		}
++		for (int x = 0; x < x1 - x0; x++) {
++			uint32_t c = src[x];
++			dst[x] = ((c >> 16 & 0xff) << p->rshift) | ((c >> 8 & 0xff) << p->gshift)
++				| ((c & 0xff) << p->bshift);
++		}
++	}
++}
++
++static int s12fb_defaults(nsfb_t *nsfb)
++{
++	nsfb->width = 1024;
++	nsfb->height = 600;
++	nsfb->format = NSFB_FMT_XRGB8888;
++	select_plotters(nsfb);
++	return 0;
++}
++
++static bool s12fb_copy(nsfb_t *nsfb, nsfb_bbox_t *srcbox, nsfb_bbox_t *dstbox)
++{
++	struct s12fb_priv *p = nsfb->surface_priv;
++	struct nsfb_cursor_s *cursor = nsfb->cursor;
++	nsfb_bbox_t allbox;
++	nsfb_plot_add_rect(srcbox, dstbox, &allbox);
++	if (cursor != NULL && cursor->plotted && nsfb_plot_bbox_intersect(&allbox, &cursor->loc))
++		nsfb_cursor_clear(nsfb, cursor);
++	bool res = p->mem_copy(nsfb, srcbox, dstbox);
++	if (cursor != NULL && !cursor->plotted)
++		nsfb_cursor_plot(nsfb, cursor);
++	flush(nsfb, dstbox);
++	return res;
++}
++
++static int s12fb_initialise(nsfb_t *nsfb)
++{
++	struct s12fb_priv *p;
++	struct fb_var_screeninfo var;
++	struct fb_fix_screeninfo fix;
++
++	if (nsfb->surface_priv != NULL)
++		return -1;
++	p = calloc(1, sizeof(*p));
++	if (p == NULL)
++		return -1;
++	p->tty_fd = p->kbd_fd = p->mouse_fd = -1;
++	p->fb_fd = open(getenv("FRAMEBUFFER") ? getenv("FRAMEBUFFER") : "/dev/fb0", O_RDWR);
++	if (p->fb_fd < 0) {
++		perror("framebuffer");
++		free(p);
++		return -1;
++	}
++	if (ioctl(p->fb_fd, FBIOGET_VSCREENINFO, &var) < 0 ||
++	    ioctl(p->fb_fd, FBIOGET_FSCREENINFO, &fix) < 0 || var.bits_per_pixel != 32) {
++		fprintf(stderr, "nsfb: a 32 bits per pixel framebuffer is needed\n");
++		close(p->fb_fd);
++		free(p);
++		return -1;
++	}
++	p->fb_pitch = fix.line_length;
++	p->rshift = var.red.offset;
++	p->gshift = var.green.offset;
++	p->bshift = var.blue.offset;
++	p->fb_size = (size_t)fix.line_length * var.yres;
++	p->fb = mmap(NULL, p->fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, p->fb_fd, 0);
++	if (p->fb == MAP_FAILED) {
++		perror("mmap framebuffer");
++		close(p->fb_fd);
++		free(p);
++		return -1;
++	}
++	nsfb->width = var.xres;
++	nsfb->height = var.yres;
++	nsfb->format = NSFB_FMT_XRGB8888;
++	select_plotters(nsfb);
++	p->mem_copy = nsfb->plotter_fns->copy;
++	nsfb->plotter_fns->copy = s12fb_copy;
++	nsfb->linelen = nsfb->width * 4;
++	nsfb->ptr = calloc((size_t)nsfb->linelen, nsfb->height);
++	if (nsfb->ptr == NULL) {
++		munmap(p->fb, p->fb_size);
++		close(p->fb_fd);
++		free(p);
++		return -1;
++	}
++
++	/* Stop the text console from drawing over the browser */
++	p->tty_fd = open("/dev/tty0", O_RDWR);
++	p->saved_kd_mode = KD_TEXT;
++	if (p->tty_fd >= 0) {
++		if (ioctl(p->tty_fd, KDGETMODE, &p->saved_kd_mode) < 0)
++			p->saved_kd_mode = KD_TEXT;
++		ioctl(p->tty_fd, KDSETMODE, KD_GRAPHICS);
++	}
++	p->kbd_fd = open("/dev/tty", O_RDWR | O_NONBLOCK);
++	/* Without a controlling terminal, the keyboard is read from the first console */
++	if (p->kbd_fd < 0)
++		p->kbd_fd = open("/dev/tty1", O_RDWR | O_NONBLOCK | O_NOCTTY);
++	if (p->kbd_fd >= 0 && tcgetattr(p->kbd_fd, &p->saved) == 0) {
++		struct termios raw = p->saved;
++		raw.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
++		raw.c_iflag &= ~(IXON | ICRNL | INLCR);
++		raw.c_cc[VMIN] = 0;
++		raw.c_cc[VTIME] = 0;
++		tcsetattr(p->kbd_fd, TCSANOW, &raw);
++		p->saved_ok = true;
++	}
++	p->mouse_fd = open("/dev/input/mice", O_RDWR | O_NONBLOCK);
++	nsfb->surface_priv = p;
++	return 0;
++}
++
++static int s12fb_finalise(nsfb_t *nsfb)
++{
++	struct s12fb_priv *p = nsfb->surface_priv;
++	if (p == NULL)
++		return 0;
++	if (p->saved_ok)
++		tcsetattr(p->kbd_fd, TCSANOW, &p->saved);
++	if (p->tty_fd >= 0) {
++		ioctl(p->tty_fd, KDSETMODE, p->saved_kd_mode);
++		close(p->tty_fd);
++	}
++	if (p->kbd_fd >= 0)
++		close(p->kbd_fd);
++	if (p->mouse_fd >= 0)
++		close(p->mouse_fd);
++	munmap(p->fb, p->fb_size);
++	close(p->fb_fd);
++	free(nsfb->ptr);
++	nsfb->ptr = NULL;
++	free(p);
++	nsfb->surface_priv = NULL;
++	return 0;
++}
++
++static int s12fb_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_format_e format)
++{
++	/* The geometry is the one of the screen */
++	if (nsfb->surface_priv == NULL) {
++		if (width > 0)
++			nsfb->width = width;
++		if (height > 0)
++			nsfb->height = height;
++		if (format != NSFB_FMT_ANY)
++			nsfb->format = format;
++		select_plotters(nsfb);
++	}
++	return 0;
++}
++
++static bool s12fb_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
++{
++	struct s12fb_priv *p = nsfb->surface_priv;
++	if (p == NULL)
++		return false;
++	if (p->q_len == 0) {
++		struct pollfd fds[2];
++		int n = 0;
++		if (p->kbd_fd >= 0) {
++			fds[n].fd = p->kbd_fd;
++			fds[n++].events = POLLIN;
++		}
++		if (p->mouse_fd >= 0) {
++			fds[n].fd = p->mouse_fd;
++			fds[n++].events = POLLIN;
++		}
++		/* A lone Escape is only known after a short while */
++		int t = timeout;
++		if (p->esc_len > 0 && (t < 0 || t > 50))
++			t = 50;
++		int r = poll(fds, n, t);
++		if (r > 0) {
++			if (p->kbd_fd >= 0)
++				read_keys(p);
++			if (p->mouse_fd >= 0)
++				read_mouse(p);
++		} else if (r == 0) {
++			flush_escape(p);
++		}
++	}
++	if (p->q_len == 0)
++		return false;
++	*event = p->queue[p->q_head];
++	p->q_head = (p->q_head + 1) % QUEUE_LEN;
++	p->q_len--;
++	return true;
++}
++
++static int s12fb_claim(nsfb_t *nsfb, nsfb_bbox_t *box)
++{
++	struct nsfb_cursor_s *cursor = nsfb->cursor;
++	if (cursor != NULL && cursor->plotted && nsfb_plot_bbox_intersect(box, &cursor->loc))
++		nsfb_cursor_clear(nsfb, cursor);
++	return 0;
++}
++
++static int s12fb_update(nsfb_t *nsfb, nsfb_bbox_t *box)
++{
++	struct nsfb_cursor_s *cursor = nsfb->cursor;
++	if (cursor != NULL && !cursor->plotted)
++		nsfb_cursor_plot(nsfb, cursor);
++	flush(nsfb, box);
++	return 0;
++}
++
++static int s12fb_cursor(nsfb_t *nsfb, struct nsfb_cursor_s *cursor)
++{
++	if (cursor != NULL && cursor->plotted) {
++		nsfb_bbox_t loc_shift = cursor->loc;
++		nsfb_bbox_t redraw;
++		loc_shift.x0 -= cursor->hotspot_x;
++		loc_shift.y0 -= cursor->hotspot_y;
++		loc_shift.x1 -= cursor->hotspot_x;
++		loc_shift.y1 -= cursor->hotspot_y;
++		nsfb_plot_add_rect(&cursor->savloc, &loc_shift, &redraw);
++		nsfb_cursor_clear(nsfb, cursor);
++		nsfb_cursor_plot(nsfb, cursor);
++		flush(nsfb, &redraw);
++	}
++	return 0;
++}
++
++const nsfb_surface_rtns_t s12fb_rtns = {
++	.defaults = s12fb_defaults,
++	.initialise = s12fb_initialise,
++	.finalise = s12fb_finalise,
++	.input = s12fb_input,
++	.claim = s12fb_claim,
++	.update = s12fb_update,
++	.cursor = s12fb_cursor,
++	.geometry = s12fb_set_geometry,
++};
++
++NSFB_SURFACE_DEF(linux, NSFB_SURFACE_LINUX, &s12fb_rtns)
++
++/* Explicit registration, see surface.c */
++void nsfb_add_linux(void) { linux_register_surface(); }

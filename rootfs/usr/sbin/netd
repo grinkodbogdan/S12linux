@@ -1,0 +1,38 @@
+#!/bin/sh
+# Network daemon: brings the Ethernet cards up, runs DHCP while a cable is plugged in, and writes
+# /run/net/status for the desktop and debug-test, one line per card:
+#   eth0 tg3 00:11:22:33:44:55 link up 100Mb/s active inet 192.168.1.20/24 gateway 192.168.1.1
+while :; do
+	STATUS=""
+	for d in /sys/class/net/*; do
+		IF=${d##*/}
+		[ -e $d/device ] || continue
+		# Cards that appear later, like USB adapters, are brought up too
+		[ $(( $(cat $d/flags) & 1 )) = 0 ] && ip link set $IF up
+		DRV=$(basename "$(readlink $d/device/driver)" 2>/dev/null)
+		LINE="$IF $DRV $(cat $d/address)"
+		PID=/run/net/udhcpc.$IF.pid
+		if [ "$(cat $d/carrier 2>/dev/null)" = 1 ]; then
+			SPEED=$(cat $d/speed 2>/dev/null)
+			LINE="$LINE link up${SPEED:+ ${SPEED}Mb/s}"
+			if [ ! -s $PID ] || ! kill -0 $(cat $PID) 2>/dev/null; then
+				udhcpc -i $IF -b -S -p $PID -s /usr/share/udhcpc/default.script -x hostname:$(hostname) >/dev/null 2>&1
+			fi
+			ADDR=$(ip -4 addr show dev $IF | grep -o 'inet [0-9./]*' | head -1)
+			GW=$(ip route show dev $IF | grep -o 'default via [0-9.]*' | cut -d' ' -f3)
+			[ -n "$ADDR" ] && LINE="$LINE active $ADDR${GW:+ gateway $GW}"
+		else
+			LINE="$LINE link down"
+			if [ -s $PID ]; then
+				kill $(cat $PID) 2>/dev/null
+				rm -f $PID
+				ip addr flush dev $IF
+			fi
+		fi
+		LINE="$LINE rx $(cat $d/statistics/rx_packets) $(cat $d/statistics/rx_bytes) tx $(cat $d/statistics/tx_packets) $(cat $d/statistics/tx_bytes)"
+		STATUS="$STATUS$LINE
+"
+	done
+	printf '%s' "$STATUS" > /run/net/status.new && mv /run/net/status.new /run/net/status
+	sleep 2
+done

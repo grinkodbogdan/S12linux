@@ -1,0 +1,22 @@
+#!/bin/sh
+# udhcpc events: sets the address, the default route and the DNS servers of $interface
+case "$1" in
+deconfig)
+	ip addr flush dev $interface
+	ip link set $interface up
+	;;
+bound | renew)
+	ip addr flush dev $interface
+	ip addr add $ip/${mask:-24} ${broadcast:+broadcast $broadcast} dev $interface
+	for r in $router; do
+		ip route replace default via $r dev $interface
+		break
+	done
+	: > /run/resolv.conf.new
+	[ -n "$domain" ] && echo "search $domain" >> /run/resolv.conf.new
+	for d in $dns; do echo "nameserver $d" >> /run/resolv.conf.new; done
+	mv /run/resolv.conf.new /run/resolv.conf
+	echo "net: $interface address $ip/${mask:-24}, gateway $router, dns $dns" > /dev/kmsg
+	;;
+esac
+exit 0
