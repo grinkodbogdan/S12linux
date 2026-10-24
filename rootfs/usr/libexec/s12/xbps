@@ -64,8 +64,9 @@ fi
 $BIN "$@"
 RC=$?
 [ $RC = 0 ] || exit $RC
-# Documentation takes RAM and is not needed here
-rm -rf /usr/share/man /usr/share/info /usr/share/doc /usr/share/gtk-doc 2> /dev/null
+# Documentation takes RAM and is not needed here (on a disk it is kept: packages list those files)
+[ "$(awk '$2 == "/" { print $3 }' /proc/mounts | tail -1)" = rootfs ] &&
+	rm -rf /usr/share/man /usr/share/info /usr/share/doc /usr/share/gtk-doc 2> /dev/null
 # Remembers the packages installed by hand, on the data stick (not those of s12-install)
 if [ -d $DATA ] && [ -z "$S12_NO_REMEMBER" ]; then
 	NAMES=""

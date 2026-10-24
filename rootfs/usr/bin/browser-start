@@ -1,5 +1,5 @@
 #!/bin/sh
-# Starts Firefox full screen, in the cage Wayland compositor (install-browser installs them).
+# Starts Badwolf full screen, in the cage Wayland compositor (install-browser installs them).
 export PATH=/usr/bin:/bin
 # udev keeps the list of devices that the compositor and libinput look for
 if ! pgrep -x udevd > /dev/null; then
@@ -16,8 +16,11 @@ export XDG_RUNTIME_DIR=/run/user/0
 mkdir -p $XDG_RUNTIME_DIR
 chmod 700 $XDG_RUNTIME_DIR
 export LIBSEAT_BACKEND=seatd
-# The GMA 950's OpenGL is too old for the compositor: it draws with the processor
+# The GMA 950's OpenGL is too old for the compositor and WebKit's GPU paths: the processor draws
 export WLR_RENDERER=pixman
 export WLR_NO_HARDWARE_CURSORS=1
-export MOZ_ENABLE_WAYLAND=1
-exec cage -s -- firefox "$@"
+export GDK_BACKEND=wayland
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+# -S: JavaScript on (Badwolf starts with it off, and most sites need it; the JS button toggles it)
+exec cage -s -- badwolf -S "${@:-https://html.duckduckgo.com/html/}"
