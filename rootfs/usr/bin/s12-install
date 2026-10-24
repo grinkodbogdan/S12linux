@@ -64,6 +64,11 @@ menuentry "S12 Linux (safe graphics: BIOS framebuffer, no GMA driver)" {
 	initrd /boot/firmware.cpio
 }
 
+menuentry "S12 Linux (Wi-Fi compatibility: try it if Wi-Fi finds no networks)" {
+	linux /boot/linux $1 quiet b43.pio=1 b43.btcoex=0 b43.qos=0 b43.nohwcrypt=1
+	initrd /boot/firmware.cpio
+}
+
 menuentry "S12 Linux (debug: all kernel messages, one processor thread)" {
 	linux /boot/linux $1 init=/sbin/textinit ignore_loglevel maxcpus=1
 	initrd /boot/firmware.cpio

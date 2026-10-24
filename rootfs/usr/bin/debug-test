@@ -330,7 +330,7 @@ else
 			bad "Wi-Fi scan" "$NETS"
 		else
 			N=$(echo "$NETS" | grep -c .)
-			[ "$N" -gt 0 ] && ok "Wi-Fi scan" "$N networks, strongest: $(echo "$NETS" | head -3 | awk -F '\t' '{ printf "%s (%s%%) ", $3, $1 }')" || bad "Wi-Fi scan" "no network found"
+			[ "$N" -gt 0 ] && ok "Wi-Fi scan" "$N networks, strongest: $(echo "$NETS" | head -3 | awk -F '\t' '{ printf "%s (%s%%) ", $3, $1 }')" || { bad "Wi-Fi scan" "no network found. Details (wifi diag):"; wifi diag 2>&1 | while IFS= read -r l; do say "       $l"; done; }
 		fi
 		WST=$(wifi status 2>&1)
 		echo "$WST" | grep -q connected && ! echo "$WST" | grep -q 'not connected' && ok "Wi-Fi connection" "$WST" || na "Wi-Fi connection" "$WST (connect with: wifi connect NAME PASSWORD)"

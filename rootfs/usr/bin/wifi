@@ -9,6 +9,7 @@
 #   wifi disconnect               leaves the network (until the next connect)
 #   wifi on | off                 turns the radio on or off
 #   wifi country CODE             sets the country (two letters, e.g. GB): channels and power
+#   wifi diag                     the card, radio switches, a raw scan and the driver's messages
 #
 # Networks are remembered in /etc/wpa_supplicant.conf, and on the data stick (see s12-data).
 
@@ -88,12 +89,12 @@ scan)
 	cli scan > /dev/null
 	# Results come within a few seconds; the first scan after the card starts takes longer
 	sleep 3
-	for i in 1 2 3 4; do
+	for i in 1 2 3 4 5 6 7 8; do
 		[ $(cli scan_results | wc -l) -gt 1 ] && break
 		sleep 2
 	done
 	# bssid freq signal flags ssid -> signal% security ssid, the strongest of each name first
-	cli scan_results | tail -n +2 | awk -F '\t' '
+	NETS=$(cli scan_results | tail -n +2 | awk -F '\t' '
 		$5 != "" && $5 !~ /^\\x00/ {
 			q = 2 * ($3 + 100); if (q > 100) q = 100; if (q < 0) q = 0
 			sec = "open"
@@ -103,7 +104,43 @@ scan)
 			if ($4 ~ /SAE/ && $4 !~ /PSK/) sec = "wpa3"
 			if (!($5 in best) || q > best[$5]) { best[$5] = q; s[$5] = sec }
 		}
-		END { for (n in best) printf "%d\t%s\t%s\n", best[n], s[n], n }' | sort -rn
+		END { for (n in best) printf "%d\t%s\t%s\n", best[n], s[n], n }')
+	# Nothing: a scan straight through the driver (iw), in case wpa_supplicant's did not work
+	[ -n "$NETS" ] || NETS=$(iw dev $IF scan 2> /dev/null | awk '
+		function out() { if (ssid != "") { if (!(ssid in best) || q > best[ssid]) { best[ssid] = q; s[ssid] = sec } } }
+		/^BSS / { out(); ssid = ""; q = 0; sec = "open" }
+		/^\tsignal:/ { q = 2 * (int($2) + 100); if (q > 100) q = 100; if (q < 0) q = 0 }
+		/^\tSSID: / { ssid = substr($0, 8) }
+		/^\tcapability:.*Privacy/ { sec = "wep" }
+		/^\tRSN:|^\tWPA:/ { sec = "wpa" }
+		END { out(); for (n in best) printf "%d\t%s\t%s\n", best[n], s[n], n }')
+	[ -n "$NETS" ] && echo "$NETS" | sort -rn
+	exit 0
+	;;
+diag)
+	# Everything about the Wi-Fi card on one screen, for when no network is found
+	[ -n "$IF" ] || { echo "No Wi-Fi interface. Kernel messages:"; dmesg | grep -i 'b43\|ssb\|bcma\|wlan\|phy[0-9]' | tail -12; exit 1; }
+	D=$(readlink -f /sys/class/net/$IF/device)
+	PCI=$D
+	while [ -n "$PCI" ] && [ ! -e "$PCI/vendor" -o ! -e "$PCI/class" ]; do PCI=${PCI%/*}; done
+	echo "Card: $IF, driver $(basename "$(readlink $D/driver)"), PCI $(cat $PCI/vendor 2>/dev/null):$(cat $PCI/device 2>/dev/null) rev $(cat $PCI/revision 2>/dev/null)"
+	echo "Kernel command line: $(cat /proc/cmdline)"
+	echo "Radio switches:"
+	for r in /sys/class/rfkill/rfkill*; do
+		[ -e $r ] && echo "  $(cat $r/name) ($(cat $r/type)): soft-off $(cat $r/soft), hard-off $(cat $r/hard)"
+	done
+	echo "Link: $(ip link show $IF | head -1 | cut -d' ' -f3)  $(iw dev $IF info 2> /dev/null | grep -o 'type .*\|channel .*' | tr '\n' ' ')"
+	echo "Regulatory: $(iw reg get 2> /dev/null | grep -m1 country)"
+	echo "wpa_supplicant: $(cli status 2> /dev/null | grep wpa_state)"
+	echo "Scan straight through the driver (iw), 10 s:"
+	iw dev $IF scan > /tmp/wifi-iwscan 2>&1 &
+	P=$!
+	for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 $P 2> /dev/null || break; sleep 1; done
+	kill $P 2> /dev/null
+	echo "  $(grep -c '^BSS ' /tmp/wifi-iwscan) access points: $(grep 'SSID: ' /tmp/wifi-iwscan | head -5 | sed 's/.*SSID: //' | tr '\n' ',')"
+	grep -v '^BSS \|^	' /tmp/wifi-iwscan | head -3 | sed 's/^/  /'
+	echo "Kernel messages:"
+	dmesg | grep -i 'b43\|ssb\|bcma\|ieee80211\|wlan\|cfg80211\|ideapad' | tail -12 | cut -c1-120
 	;;
 connect)
 	[ -n "$2" ] || die "usage: wifi connect NAME [PASSWORD]"
@@ -190,7 +227,7 @@ country)
 	echo "Country set to $C."
 	;;
 *)
-	sed -n '2,13s/^# \{0,1\}//p' "$0"
+	sed -n '2,14s/^# \{0,1\}//p' "$0"
 	exit 1
 	;;
 esac

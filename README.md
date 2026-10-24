@@ -95,6 +95,12 @@ Intel 5100/5150/1000 cards, Atheros cards, and USB adapters with Ralink/MediaTek
 Realtek (rtl8187, rtl8xxxu) and Atheros (ar9271) chips work without that step. Networks using
 only WPA3 are not supported (wpa_supplicant is built without OpenSSL, to save RAM).
 
+
+If a scan finds nothing: run `wifi diag` (the card, the radio switches, a scan straight through
+the driver, and the driver's messages; `debug-test` shows it too). The boot menu entry **Wi-Fi
+compatibility** starts the Broadcom driver without DMA, Bluetooth coexistence, QoS or hardware
+encryption, the usual cure for BCM4312 cards that scan but hear nothing.
+
 ### Packages (XBPS)
 
 S12 Linux uses Void Linux's package manager and its i686 repository (glibc), so thousands of
