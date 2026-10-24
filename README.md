@@ -53,6 +53,13 @@ and GRUB from Void's repository. The disk gets one ext4 partition and a 512 MB s
 settings and packages then stay across reboots, and the RAM is free for programs. Remove the stick
 and restart.
 
+The Wi-Fi drivers are in the kernel and start before the disk is mounted, so GRUB also loads
+`/boot/firmware.cpio`, a small archive of the firmware (built by `firmware-initrd`) that the
+kernel unpacks in memory first.
+
+To update an installed system to a newer stick (kernel, firmware, S12's programs, boot menu),
+boot the stick and run `s12-install --update`: files and packages stay.
+
 ### Modern web browser (Badwolf)
 
 On a system installed on the disk, run `install-browser`: it installs

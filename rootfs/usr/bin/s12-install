@@ -3,6 +3,8 @@
 #
 #   s12-install                 shows the disk, asks for confirmation, installs
 #   s12-install --yes DISK      installs on DISK (e.g. /dev/sda) without asking
+#   s12-install --update        updates an installed system to this stick's version (kernel,
+#                               firmware, S12's programs and boot menu); files and packages stay
 #
 # The disk gets one ext4 partition with the system, as on the stick but kept on the disk: files,
 # Wi-Fi networks and packages stay across reboots, and the RAM is free for programs (a 512 MB
@@ -40,7 +42,60 @@ describe() {
 	done
 }
 
-if [ "$1" = --yes ]; then
+# The boot menu of the installed system. $1: the root= argument
+write_grub_cfg() {
+	cat > $T/boot/grub/grub.cfg <<EOT
+set timeout=3
+set default=0
+
+menuentry "S12 Linux" {
+	linux /boot/linux $1 quiet
+	initrd /boot/firmware.cpio
+}
+
+menuentry "S12 Linux (text console)" {
+	linux /boot/linux $1 init=/sbin/textinit quiet
+	initrd /boot/firmware.cpio
+}
+
+menuentry "S12 Linux (safe graphics: BIOS framebuffer, no GMA driver)" {
+	set gfxpayload=keep
+	linux /boot/linux $1 quiet nomodeset
+	initrd /boot/firmware.cpio
+}
+
+menuentry "S12 Linux (debug: all kernel messages, one processor thread)" {
+	linux /boot/linux $1 init=/sbin/textinit ignore_loglevel maxcpus=1
+	initrd /boot/firmware.cpio
+}
+EOT
+}
+
+# S12's own programs in /usr/bin (the others come from packages)
+S12_PROGRAMS="init textinit desk soundtest tpd netsurf-fb browser browser-start debug-test
+	install-browser netd netsurf s12-data s12-install wifi wifi-firmware"
+
+if [ "$1" = --update ]; then
+	PART=$(blkid | grep 'LABEL="S12LINUX"' | cut -d: -f1 | head -1)
+	[ -n "$PART" ] || die "no installed S12 Linux found (a partition named S12LINUX)"
+	B=$(/usr/libexec/s12/boot-medium) || die "the boot stick is not found: it holds the kernel"
+	step "Updating S12 Linux on $PART"
+	mkdir -p $T
+	mount -t ext4 $PART $T
+	ROOT=$(grep -o 'root=PARTUUID=[0-9a-f-]*' $T/boot/grub/grub.cfg | head -1)
+	[ -n "$ROOT" ] || { umount $T; die "the boot menu of $PART is not S12 Linux's"; }
+	cp $B/boot/linux $T/boot/linux
+	# tar replaces files and links alike (cp does not replace links)
+	(cd / && tar cf - usr/lib/firmware usr/libexec/s12 etc/rc $(for p in $S12_PROGRAMS; do echo usr/bin/$p; done)) |
+		tar xf - -C $T
+	/usr/libexec/s12/firmware-initrd $T
+	write_grub_cfg "$ROOT rw rootwait"
+	sync
+	umount $T
+	step "Done"
+	echo "S12 Linux on $PART is updated. Remove the stick and restart (Menu > Reboot)."
+	exit 0
+elif [ "$1" = --yes ]; then
 	DISK=$2
 	[ -b "$DISK" ] || die "no disk $DISK"
 else
@@ -120,28 +175,9 @@ step "Boot loader (GRUB, from Void's repository)"
 xbps-install -r $T -Sy grub
 for m in dev proc sys; do mount --bind /$m $T/$m; done
 chroot $T /usr/bin/grub-install --target=i386-pc $DISK
-ROOT="root=PARTUUID=$SIG-01 rw rootwait"
-cat > $T/boot/grub/grub.cfg <<EOT
-set timeout=3
-set default=0
-
-menuentry "S12 Linux" {
-	linux /boot/linux $ROOT quiet
-}
-
-menuentry "S12 Linux (text console)" {
-	linux /boot/linux $ROOT init=/sbin/textinit quiet
-}
-
-menuentry "S12 Linux (safe graphics: BIOS framebuffer, no GMA driver)" {
-	set gfxpayload=keep
-	linux /boot/linux $ROOT quiet nomodeset
-}
-
-menuentry "S12 Linux (debug: all kernel messages, one processor thread)" {
-	linux /boot/linux $ROOT init=/sbin/textinit ignore_loglevel maxcpus=1
-}
-EOT
+# The Wi-Fi firmware, for the drivers that start before the disk is mounted
+/usr/libexec/s12/firmware-initrd $T
+write_grub_cfg "root=PARTUUID=$SIG-01 rw rootwait"
 for m in sys proc dev; do umount $T/$m; done
 sync
 umount $T

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Builds /boot/firmware.cpio, which GRUB loads with the kernel on a system installed on the disk.
+# The Wi-Fi drivers are in the kernel and ask for their firmware as soon as they find the card,
+# before the disk is mounted: this small archive (the kernel unpacks it in memory, and with no
+# program to run in it, goes on to mount the disk) gives them the firmware at that moment.
+#
+#   firmware-initrd [ROOT]   ROOT: where the system is (default /), e.g. /mnt/target
+export PATH=/usr/bin:/bin
+R=${1%/}
+cd $R/usr || exit 1
+mkdir -p $R/boot
+{ echo lib; find lib/firmware; } | cpio -o -H newc 2> /dev/null > $R/boot/firmware.cpio.new &&
+	mv $R/boot/firmware.cpio.new $R/boot/firmware.cpio

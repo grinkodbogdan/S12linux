@@ -36,7 +36,12 @@ tar xjf $TMP/$NAME -C $TMP broadcom-wl-5.100.138/linux/wl_apsta.o
 mkdir -p /lib/firmware
 b43-fwcutter -w /lib/firmware $TMP/broadcom-wl-5.100.138/linux/wl_apsta.o > /dev/null
 echo "Installed $(ls /lib/firmware/b43 | wc -l) firmware files in /lib/firmware/b43."
-if command -v s12-data > /dev/null && s12-data save --quiet; then
+if [ "$(awk '$2 == "/" { print $3 }' /proc/mounts | tail -1)" != rootfs ]; then
+	# Installed on the disk: the driver reads it at boot, from the archive GRUB loads
+	/usr/libexec/s12/firmware-initrd
+	echo "Done. Restart the laptop to use it."
+	exit 0
+elif command -v s12-data > /dev/null && s12-data save --quiet; then
 	:
 else
 	echo "Tip: with a data stick (s12-data setup), the firmware is kept for the next boots."
