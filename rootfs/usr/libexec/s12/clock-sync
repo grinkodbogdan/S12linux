@@ -1,0 +1,24 @@
+#!/bin/sh
+# Sets the system clock from the internet: with NTP, or else from the date a web server gives in
+# its answer (port 80, which works where NTP is blocked). Secure sites and package signatures
+# need a right date, and the BIOS clock of old laptops is often wrong. Only the system's time is
+# set, not the BIOS clock (Windows on the same laptop keeps it). Exits 0 once the date is right.
+export PATH=/usr/bin:/bin
+ok() { [ "$(date +%Y)" -ge 2026 ]; }
+
+if timeout 15 ntpd -n -q -p pool.ntp.org -p time.google.com > /dev/null 2>&1 && ok; then
+	echo "clock-sync: $(date) (NTP)" > /dev/kmsg
+	exit 0
+fi
+for host in repo-default.voidlinux.org www.google.com example.com; do
+	# "Date: Sat, 24 Oct 2026 07:12:00 GMT" -> "2026-10-24 07:12:00"
+	D=$(printf 'HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n' $host | timeout 10 nc $host 80 2> /dev/null \
+		| tr -d '\r' | awk 'tolower($1) == "date:" {
+			m = index("JanFebMarAprMayJunJulAugSepOctNovDec", $4); if (m == 0) exit
+			printf "%s-%02d-%02d %s\n", $5, (m + 2) / 3, $3, $6; exit }')
+	if [ -n "$D" ] && date -u -s "$D" > /dev/null 2>&1 && ok; then
+		echo "clock-sync: $(date) (from $host)" > /dev/kmsg
+		exit 0
+	fi
+done
+exit 1

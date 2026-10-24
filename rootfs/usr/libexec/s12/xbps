@@ -45,6 +45,13 @@ if [ ! -x $BIN ]; then
 	[ -d $DATA ] && [ ! -s $DATA/$TARBALL ] && cp "$T" $DATA/ 2> /dev/null
 fi
 
+# A wrong date makes the server's certificate look invalid ("certificate verification failed")
+if [ "$(date +%Y)" -lt 2026 ]; then
+	echo "The clock says $(date +%Y-%m-%d): setting it from the internet first..." >&2
+	/usr/libexec/s12/clock-sync && touch /run/net/clock-ok ||
+		echo "Could not set the clock: set the date in the BIOS (F2 at the Lenovo logo), or: date -s 'YYYY-MM-DD hh:mm'" >&2
+fi
+
 case $TOOL in
 xbps-install | xbps-remove) ;;
 *) exec $BIN "$@" ;;

@@ -39,6 +39,10 @@ step_fetch() {
 	fetch_one "$ZIG_URL" "$ZIG_SHA256"
 	fetch_one "$DEJAVU_URL" "$DEJAVU_SHA256"
 	fetch_one "$CACERT_URL" - cacert.pem
+	for c in $EXTRA_ROOTS; do
+		u=${c%%|*}
+		fetch_one "$u" "${c#*|}" "le-${u##*/}"
+	done
 	for w in $WEB_SOURCES $WIFI_SOURCES; do
 		fetch_one "$(echo $w | cut -d'|' -f1)" "$(echo $w | cut -d'|' -f2)"
 	done
@@ -298,6 +302,11 @@ step_rootfs() {
 		cp $WORK/dejavu/ttf/$f.ttf $R/usr/share/fonts/
 	done
 	cp "$DL/cacert.pem" $R/etc/ssl/certs/ca-certificates.crt
+	for c in $EXTRA_ROOTS; do
+		u=${c%%|*}
+		printf '\n%s\n' "${u##*/} (Let's Encrypt)" >> $R/etc/ssl/certs/ca-certificates.crt
+		cat "$DL/le-${u##*/}" >> $R/etc/ssl/certs/ca-certificates.crt
+	done
 	# The name XBPS (LibreSSL) looks for
 	ln -s certs/ca-certificates.crt $R/etc/ssl/cert.pem
 	$CROSS-strip -o $R/usr/bin/curl $WORK/web/src/curl-8.10.1/src/curl

@@ -12,6 +12,12 @@ DEJAVU_URL=https://github.com/dejavu-fonts/dejavu-fonts/releases/download/versio
 DEJAVU_SHA256=fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
 # Mozilla's CA certificates, as packaged by curl (updated regularly, so not checksummed)
 CACERT_URL=https://curl.se/ca/cacert.pem
+# Let's Encrypt's newer roots, not yet in Mozilla's list: sites using them (Void's repository) are
+# then verified directly, without the cross-signature that older TLS code (XBPS) fails on
+EXTRA_ROOTS="
+https://letsencrypt.org/certs/gen-y/root-yr.pem|d8a34bfb5df6b4a0592b0a9cd6b3b9a9335bd431cb2ac32243ab298cba24cbf2
+https://letsencrypt.org/certs/gen-y/root-ye.pem|b8471c8049835b4097069ae3d43ea8235b510c0aa2699dedaaab9bc10be3d2c4
+"
 # Web browser and its libraries: url|sha256|directory
 WEB_SOURCES="
 https://download.netsurf-browser.org/netsurf/releases/source-full/netsurf-all-3.11.tar.gz|4dea880ff3c2f698bfd62c982b259340f9abcd7f67e6c8eb2b32c61f71644b7b|netsurf-all-3.11
