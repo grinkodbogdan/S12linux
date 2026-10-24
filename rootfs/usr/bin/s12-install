@@ -1,0 +1,151 @@
+#!/bin/sh
+# Installs S12 Linux on the laptop's internal disk. THE WHOLE DISK IS ERASED (Windows included).
+#
+#   s12-install                 shows the disk, asks for confirmation, installs
+#   s12-install --yes DISK      installs on DISK (e.g. /dev/sda) without asking
+#
+# The disk gets one ext4 partition with the system, as on the stick but kept on the disk: files,
+# Wi-Fi networks and packages stay across reboots, and the RAM is free for programs (a 512 MB
+# swap file helps the web browser). GRUB boots it. Needs the boot stick plugged in (the kernel
+# and XBPS are on it) and the network (mkfs.ext4 and GRUB come from Void's repository).
+
+export PATH=/usr/bin:/bin
+export S12_NO_REMEMBER=1
+T=/mnt/target
+set -e
+
+die() { echo "s12-install: $*" >&2; exit 1; }
+step() { printf '\n== %s\n' "$*"; }
+
+# Installed systems run from their disk, not from RAM
+[ "$(awk '$2 == "/" { print $3 }' /proc/mounts | tail -1)" = rootfs ] ||
+	die "S12 Linux is already running from a disk."
+
+# The internal disks: not USB, not SD cards, at least 2 GB
+disks() {
+	for b in /sys/block/sd* /sys/block/hd*; do
+		[ -e "$b" ] || continue
+		case $(readlink -f $b) in */usb*) continue ;; esac
+		[ $(cat $b/size) -ge 4000000 ] && echo /dev/${b##*/}
+	done
+}
+
+describe() {
+	b=/sys/block/${1#/dev/}
+	echo "$1: $(cat $b/device/vendor 2>/dev/null | tr -s ' ')$(cat $b/device/model 2>/dev/null | tr -s ' '), $(($(cat $b/size) / 2097152)) GB"
+	for p in $b/${1#/dev/}[0-9]*; do
+		[ -e "$p" ] || continue
+		P=/dev/${p##*/}
+		echo "    $P  $(($(cat $p/size) / 2048)) MB  $(blkid $P | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p') $(blkid $P | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p')"
+	done
+}
+
+if [ "$1" = --yes ]; then
+	DISK=$2
+	[ -b "$DISK" ] || die "no disk $DISK"
+else
+	DISK=$(disks | head -1)
+	[ -n "$DISK" ] || die "no internal disk found (run debug-test for details)"
+	[ $(disks | wc -l) -gt 1 ] && echo "Disks: $(disks | tr '\n' ' ') (the first one is used; run s12-install --yes DISK for another)"
+	echo "S12 Linux will be installed on the laptop's internal disk:"
+	echo
+	describe $DISK
+	echo
+	echo "EVERYTHING ON THIS DISK WILL BE ERASED: Windows, files, recovery partitions."
+	printf 'Type ERASE to continue: '
+	read answer
+	[ "$answer" = ERASE ] || die "cancelled, nothing was changed"
+fi
+
+step "Checking the boot stick and the network"
+B=$(/usr/libexec/s12/boot-medium) || die "the boot stick is not found: it holds the kernel"
+grep -q ' active ' /run/net/status 2>/dev/null || die "no network: connect Wi-Fi or Ethernet first"
+
+step "Getting the disk tools (e2fsprogs) from Void's repository"
+command -v mkfs.ext4 > /dev/null || xbps-install -Sy e2fsprogs
+
+step "Partitioning $DISK"
+for p in $(grep "^$DISK" /proc/mounts | cut -d' ' -f2); do umount $p; done
+swapoff -a 2> /dev/null || true
+SECTORS=$(cat /sys/block/${DISK#/dev/}/size)
+# The first MiB: boot code and partition table, then the gap GRUB uses
+dd if=/dev/zero of=$DISK bs=1M count=1 conv=fsync 2> /dev/null
+# One bootable Linux partition from 1 MiB to the end, and a random disk signature (PARTUUID)
+byte() { printf "\\$(printf %o $1)"; }
+le32() { byte $(($1 & 255)); byte $((($1 >> 8) & 255)); byte $((($1 >> 16) & 255)); byte $((($1 >> 24) & 255)); }
+SIG=$(hexdump -n 4 -e '1/4 "%08x"' /dev/urandom)
+START=2048
+COUNT=$((SECTORS - START))
+{
+	le32 $((0x$SIG))
+	byte 0; byte 0
+	byte 128; byte 254; byte 255; byte 255; byte 131; byte 254; byte 255; byte 255
+	le32 $START
+	le32 $COUNT
+	dd if=/dev/zero bs=48 count=1 2> /dev/null
+	byte 85; byte 170
+} > /tmp/s12-mbr
+[ $(wc -c < /tmp/s12-mbr) = 72 ] || die "could not build the partition table"
+dd if=/tmp/s12-mbr of=$DISK bs=1 seek=440 conv=notrunc,fsync 2> /dev/null
+blockdev --rereadpt $DISK
+sleep 2
+PART=${DISK}1
+[ -b $PART ] || die "the new partition $PART did not appear"
+
+step "Formatting $PART (ext4)"
+mkfs.ext4 -F -q -L S12LINUX $PART
+
+step "Copying the system"
+mkdir -p $T
+mount -t ext4 $PART $T
+for d in usr etc var root; do cp -a /$d $T/; done
+for l in bin sbin lib lib32; do cp -a /$l $T/; done
+mkdir -p $T/proc $T/sys $T/dev $T/run $T/tmp $T/mnt $T/data $T/boot
+chmod 1777 $T/tmp
+# Settings that only make sense when running from the stick
+rm -f $T/etc/xbps.d/10-s12-data-cache.conf
+cp $B/boot/linux $T/boot/linux
+# XBPS, kept on the disk
+mkdir -p $T/usr/libexec/s12/xbps-bin
+tar xJf $B/s12/xbps-static-latest.i686-musl.tar.xz -C /tmp ./usr/bin 2> /dev/null ||
+	tar xJf $B/s12/xbps-static-latest.i686-musl.tar.xz -C /tmp usr/bin
+cp /tmp/usr/bin/*.static $T/usr/libexec/s12/xbps-bin/
+
+step "Swap file (512 MB)"
+dd if=/dev/zero of=$T/swapfile bs=1M count=512 2> /dev/null
+chmod 600 $T/swapfile
+mkswap $T/swapfile > /dev/null
+
+step "Boot loader (GRUB, from Void's repository)"
+xbps-install -r $T -Sy grub
+for m in dev proc sys; do mount --bind /$m $T/$m; done
+chroot $T /usr/bin/grub-install --target=i386-pc $DISK
+ROOT="root=PARTUUID=$SIG-01 rw rootwait"
+cat > $T/boot/grub/grub.cfg <<EOT
+set timeout=3
+set default=0
+
+menuentry "S12 Linux" {
+	linux /boot/linux $ROOT quiet
+}
+
+menuentry "S12 Linux (text console)" {
+	linux /boot/linux $ROOT init=/sbin/textinit quiet
+}
+
+menuentry "S12 Linux (safe graphics: BIOS framebuffer, no GMA driver)" {
+	set gfxpayload=keep
+	linux /boot/linux $ROOT quiet nomodeset
+}
+
+menuentry "S12 Linux (debug: all kernel messages, one processor thread)" {
+	linux /boot/linux $ROOT init=/sbin/textinit ignore_loglevel maxcpus=1
+}
+EOT
+for m in sys proc dev; do umount $T/$m; done
+sync
+umount $T
+
+step "Done"
+echo "S12 Linux is installed on $DISK. Remove the stick and restart (Menu > Reboot)."
+echo "Then a modern web browser can be added with: install-browser"

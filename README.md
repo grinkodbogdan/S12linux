@@ -44,6 +44,23 @@ RAM: about 45 MB in use with the desktop running.
 Nothing is written to the laptop's disk. Files you create live in RAM and are gone after a
 reboot; save them on a USB stick (`mount /dev/sdb1 /mnt`).
 
+### Installing on the internal disk
+
+Menu > **Install to Disk** (or `s12-install` in a terminal) installs S12 Linux on the laptop's
+hard disk. **The whole disk is erased**, Windows included: it shows the disk and asks you to type
+`ERASE`. It needs the boot stick plugged in and the network (Wi-Fi or Ethernet), for `mkfs.ext4`
+and GRUB from Void's repository. The disk gets one ext4 partition and a 512 MB swap file; files,
+settings and packages then stay across reboots, and the RAM is free for programs. Remove the stick
+and restart.
+
+### Modern web browser (Firefox)
+
+On a system installed on the disk, run `install-browser`: it installs Firefox from Void's
+repository (about 300 MB) with the [cage](https://github.com/cage-kiosk/cage) Wayland compositor,
+which shows it full screen. Menu > Web Browser then starts Firefox (Ctrl+Q goes back to the
+desktop); NetSurf, the light browser, stays available as `netsurf`. With 1 GB of RAM and an Atom,
+Firefox is usable but not fast: NetSurf remains the quick choice for simple pages.
+
 ### Wi-Fi
 
 Open **Menu > Wi-Fi**: pick a network, type its password, press Enter. From a terminal:
@@ -131,7 +148,7 @@ the SHA-256 sums in `sources.sh`. Everything happens in `./work` (or `$WORK`); t
 | `desk/` | The desktop (`desk`), the init program (`minit`), the touchpad daemon (`tpd`) and `soundtest` |
 | `netsurf/` | Patch for NetSurf (framebuffer surface for a raw console with mouse wheel, Ctrl+L, focus), build settings (`Makefile.config`), browser settings |
 | `wifi/` | wpa_supplicant build options |
-| `rootfs/` | Files copied into the root file system: startup (`etc/rc`), network daemon (`netd`), DHCP script, power button, `wifi`, `wifi-firmware`, `s12-data`, the XBPS wrapper and settings, `debug-test` |
+| `rootfs/` | Files copied into the root file system: startup (`etc/rc`), network daemon (`netd`), DHCP script, power button, `wifi`, `wifi-firmware`, `s12-data`, `s12-install`, `install-browser`, the XBPS wrapper and settings, `debug-test` |
 | `boot/grub.cfg` | Boot menu |
 
 ## How it starts

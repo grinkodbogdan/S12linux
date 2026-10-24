@@ -13,6 +13,8 @@ export SSL_CA_CERT_FILE=${SSL_CA_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}
 TOOL=${0##*/}
 DIR=/run/xbps
 BIN=$DIR/usr/bin/$TOOL.static
+# On a system installed on disk (s12-install), the tools are kept there
+[ -x /usr/libexec/s12/xbps-bin/$TOOL.static ] && BIN=/usr/libexec/s12/xbps-bin/$TOOL.static
 TARBALL=xbps-static-latest.i686-musl.tar.xz
 URL=https://repo-default.voidlinux.org/static
 DATA=/data/s12linux
@@ -21,16 +23,7 @@ DATA=/data/s12linux
 find_tarball() {
 	[ -s $DIR/$TARBALL ] && { echo $DIR/$TARBALL; return; }
 	[ -s $DATA/$TARBALL ] && { echo $DATA/$TARBALL; return; }
-	mkdir -p /run/boot
-	if ! grep -q " /run/boot " /proc/mounts; then
-		for d in /dev/sr[0-9] /dev/sd[a-z]; do
-			[ -b $d ] || continue
-			mount -t iso9660 -o ro $d /run/boot 2> /dev/null || continue
-			[ -s /run/boot/s12/$TARBALL ] && break
-			umount /run/boot
-		done
-	fi
-	[ -s /run/boot/s12/$TARBALL ] && { echo /run/boot/s12/$TARBALL; return; }
+	B=$(/usr/libexec/s12/boot-medium) && [ -s $B/s12/$TARBALL ] && { echo $B/s12/$TARBALL; return; }
 	echo "Downloading XBPS from $URL..." >&2
 	curl -fsSL -o $DIR/$TARBALL.part "$URL/$TARBALL" || return 1
 	SUM=$(curl -fsSL "$URL/sha256sums.txt" | awk -v f=$TARBALL '$2 == f { print $1 }')
@@ -73,8 +66,8 @@ RC=$?
 [ $RC = 0 ] || exit $RC
 # Documentation takes RAM and is not needed here
 rm -rf /usr/share/man /usr/share/info /usr/share/doc /usr/share/gtk-doc 2> /dev/null
-# Remembers the packages installed by hand, on the data stick
-if [ -d $DATA ]; then
+# Remembers the packages installed by hand, on the data stick (not those of s12-install)
+if [ -d $DATA ] && [ -z "$S12_NO_REMEMBER" ]; then
 	NAMES=""
 	SKIP=0
 	for a in "$@"; do

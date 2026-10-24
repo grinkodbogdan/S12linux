@@ -1,11 +1,12 @@
 #!/bin/sh
 # Starts the system: file systems, console, power button, network.
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin
-# The kernel does not mount /dev itself when it starts from an initramfs
-mount -t devtmpfs devtmpfs /dev
 mount -t proc proc /proc
+# The kernel mounts /dev itself when it starts from a disk, not from the stick (initramfs)
+grep -q ' /dev ' /proc/mounts || mount -t devtmpfs devtmpfs /dev
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts /dev/shm
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
 mount -t devpts devpts /dev/pts
 mount -t tmpfs -o size=8m,mode=755 tmpfs /run
 mount -t tmpfs tmpfs /tmp
@@ -14,6 +15,8 @@ hostname -F /etc/hostname
 # Only errors from the kernel on the screen; everything stays in dmesg
 dmesg -n 3
 ip link set lo up
+# Swap file of an installation on disk (s12-install)
+[ -f /swapfile ] && swapon /swapfile
 # The touchpad: scrolling with two fingers or the right edge, tap to click
 tpd &
 # The power button shuts down cleanly

@@ -1,3 +1,7 @@
 #!/bin/sh
-# Starts the web browser on the screen. Ctrl+Q quits.
+# Starts the web browser on the screen: Firefox if it is installed (install-browser), else
+# NetSurf. In NetSurf, Ctrl+Q quits.
+if [ -x /usr/bin/firefox ] && [ -x /usr/bin/cage ]; then
+	exec /usr/bin/firefox-start "$@"
+fi
 exec /usr/bin/netsurf-fb -f linux "$@"

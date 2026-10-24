@@ -1,0 +1,23 @@
+#!/bin/sh
+# Starts Firefox full screen, in the cage Wayland compositor (install-browser installs them).
+export PATH=/usr/bin:/bin
+# udev keeps the list of devices that the compositor and libinput look for
+if ! pgrep -x udevd > /dev/null; then
+	udevd --daemon
+	udevadm trigger --action=add
+	udevadm settle -t 10
+fi
+# seatd gives the compositor the screen and the input devices
+if ! pgrep -x seatd > /dev/null; then
+	seatd -g root > /dev/null 2>&1 &
+	sleep 1
+fi
+export XDG_RUNTIME_DIR=/run/user/0
+mkdir -p $XDG_RUNTIME_DIR
+chmod 700 $XDG_RUNTIME_DIR
+export LIBSEAT_BACKEND=seatd
+# The GMA 950's OpenGL is too old for the compositor: it draws with the processor
+export WLR_RENDERER=pixman
+export WLR_NO_HARDWARE_CURSORS=1
+export MOZ_ENABLE_WAYLAND=1
+exec cage -s -- firefox "$@"

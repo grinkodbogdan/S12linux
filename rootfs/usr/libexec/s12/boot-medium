@@ -1,0 +1,16 @@
+#!/bin/sh
+# Mounts the boot stick (or CD) of S12 Linux on /run/boot, read-only, and prints that path.
+# It is the ISO 9660 file system that holds s12/ next to boot/linux.
+export PATH=/usr/bin:/bin
+M=/run/boot
+mkdir -p $M
+if ! grep -q " $M " /proc/mounts; then
+	for d in /dev/sr[0-9] /dev/sd[a-z] /dev/sd[a-z][0-9]; do
+		[ -b $d ] || continue
+		mount -t iso9660 -o ro $d $M 2> /dev/null || continue
+		[ -d $M/s12 ] && [ -f $M/boot/linux ] && break
+		umount $M
+	done
+fi
+[ -d $M/s12 ] && [ -f $M/boot/linux ] && { echo $M; exit 0; }
+exit 1

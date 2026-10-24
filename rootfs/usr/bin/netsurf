@@ -1,0 +1,3 @@
+#!/bin/sh
+# NetSurf, the light web browser. Ctrl+Q quits.
+exec /usr/bin/netsurf-fb -f linux "$@"

@@ -571,10 +571,22 @@ int battery_state(int *level, int *charging, char *desc, int desc_size) {
 }
 
 /* Entries of the menu. APP_COUNT is a separator, -1 restarts the desktop, -2 reboots and -3 powers
- * off (init does it, on SIGTERM and SIGUSR2), -4 starts the web browser */
+ * off (init does it, on SIGTERM and SIGUSR2), -4 starts the web browser, -5 installs the system
+ * on the disk (only shown when running from the stick) */
 static const int menu_items[] = {-4, APP_WIFI, APP_TERMINAL, APP_FILES, APP_COUNT, APP_MONITOR, APP_CALC, APP_MINES,
-	APP_COUNT, APP_SETTINGS, APP_ABOUT, APP_COUNT, -1, -2, -3};
-static const char *menu_actions[] = {"Restart desktop", "Reboot", "Shut down", "Web Browser"};
+	APP_COUNT, APP_SETTINGS, APP_ABOUT, -5, APP_COUNT, -1, -2, -3};
+static const char *menu_actions[] = {"Restart desktop", "Reboot", "Shut down", "Web Browser", "Install to Disk"};
+
+/* Tells whether the system runs from the stick (its root is the RAM file system, "rootfs") */
+static int running_live(void) {
+	static int live = -1;
+	if (live < 0) {
+		char buf[4096] = "";
+		read_file("/proc/mounts", buf, sizeof(buf));
+		live = strstr(buf, "rootfs / rootfs") != NULL;
+	}
+	return live;
+}
 static void run_fullscreen(const char *path);
 static void input_init(void);
 static void input_shutdown(void);
@@ -671,7 +683,8 @@ static void menu(void) {
 	int item_h = 26, sep_h = 9, w = 220;
 	int h = 8 + 30;
 	for (int i = 0; i < n; i++)
-		h += menu_items[i] == APP_COUNT ? sep_h : item_h;
+		if (menu_items[i] != -5 || running_live())
+			h += menu_items[i] == APP_COUNT ? sep_h : item_h;
 	int x = mu_clamp(menu_pos.x, 0, scr.w - w), y = mu_clamp(menu_pos.y, PANEL_H, scr.h - h);
 	int opt = MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOCLOSE;
 	if (!mu_begin_window_ex(ctx, "##menu", mu_rect(x, y, w, h), opt))
@@ -685,6 +698,8 @@ static void menu(void) {
 	int iy = y + 34;
 	for (int i = 0; i < n; i++) {
 		int app = menu_items[i];
+		if (app == -5 && !running_live())
+			continue;
 		if (app == APP_COUNT) {
 			mu_draw_rect(ctx, mu_rect(x + 8, iy + sep_h / 2, w - 16, 1), mu_color(255, 255, 255, 20));
 			iy += sep_h;
@@ -709,6 +724,12 @@ static void menu(void) {
 				exit(0);
 			if (app == -4) {
 				run_fullscreen("/usr/bin/browser");
+				continue;
+			}
+			if (app == -5) {
+				Window *win = open_app(APP_TERMINAL, "s12-install");
+				if (win)
+					active_window = win;
 				continue;
 			}
 			if (app < 0) {

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Installs Firefox, a modern web browser, from Void's repository, with what it needs to show
+# full screen without a desktop of its own: the cage Wayland compositor, seatd and udev.
+# About 300 MB: S12 Linux has to be installed on the disk first (s12-install).
+# Afterwards Menu > Web Browser starts Firefox; NetSurf stays available as "netsurf".
+export PATH=/usr/bin:/bin
+if [ "$(awk '$2 == "/" { print $3 }' /proc/mounts | tail -1)" = rootfs ]; then
+	echo "Firefox needs about 300 MB of disk: install S12 Linux on the disk first (s12-install)."
+	exit 1
+fi
+xbps-install -Sy firefox cage seatd eudev mesa-dri dejavu-fonts-ttf xkeyboard-config || exit 1
+# Settings for an old laptop with 1 GB of RAM: fewer processes, tabs unloaded when memory runs
+# low, no telemetry, no first-run pages
+mkdir -p /usr/lib/firefox/distribution
+cat > /usr/lib/firefox/distribution/policies.json <<'EOT'
+{
+  "policies": {
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DontCheckDefaultBrowser": true,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "UserMessaging": {"WhatsNew": false, "ExtensionRecommendations": false, "FeatureRecommendations": false, "SkipOnboarding": true},
+    "Preferences": {
+      "dom.ipc.processCount": {"Value": 2, "Status": "default"},
+      "browser.tabs.unloadOnLowMemory": {"Value": true, "Status": "default"},
+      "browser.sessionhistory.max_total_viewers": {"Value": 0, "Status": "default"},
+      "browser.cache.memory.capacity": {"Value": 32768, "Status": "default"},
+      "general.smoothScroll": {"Value": true, "Status": "default"}
+    }
+  }
+}
+EOT
+echo
+echo "Firefox is installed: Menu > Web Browser. In Firefox, Ctrl+Q quits back to the desktop."
