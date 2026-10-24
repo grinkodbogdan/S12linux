@@ -7,6 +7,9 @@
 # packages installed are remembered and installed again after a reboot, from the cache on it.
 
 export PATH=/usr/bin:/bin
+# The static XBPS does not find the system's certificates by itself: without this, every
+# server fails with "Certificate verification failed"
+export SSL_CA_CERT_FILE=${SSL_CA_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}
 TOOL=${0##*/}
 DIR=/run/xbps
 BIN=$DIR/usr/bin/$TOOL.static
