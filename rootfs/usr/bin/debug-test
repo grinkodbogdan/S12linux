@@ -43,6 +43,10 @@ save_usb() {
 	mkdir -p /mnt/debug-test
 	for p in /dev/sd?[0-9] /dev/mmcblk?p[0-9]; do
 		[ -e "$p" ] || continue
+		# USB sticks and SD cards only, not the laptop's disk
+		d=${p#/dev/}
+		case $d in mmcblk*) d=${d%p*} ;; *) d=${d%%[0-9]*} ;; esac
+		case $(readlink -f /sys/block/$d) in */usb*|*/mmc*) ;; *) continue ;; esac
 		grep -q "^$p " /proc/mounts && continue
 		T=$(blkid "$p" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
 		if [ -n "$T" ] && mount -t $T "$p" /mnt/debug-test 2>/dev/null; then
@@ -111,7 +115,7 @@ YEAR=$(date +%Y)
 if [ "$YEAR" -ge 2024 ] 2>/dev/null; then
 	ok "Clock" "$(date)"
 else
-	bad "Clock" "$(date): set the date in the BIOS, secure sites need it"
+	bad "Clock" "$(date): it is set from the internet once connected; or set it in the BIOS (F2)"
 fi
 
 # Processor
@@ -132,13 +136,21 @@ else
 fi
 IDLE=$(read_file /sys/devices/system/cpu/cpuidle/current_driver)
 [ -n "$IDLE" ] && [ "$IDLE" != none ] && ok "Idle states" "$IDLE, $(ls -d /sys/devices/system/cpu/cpu0/cpuidle/state* 2>/dev/null | wc -l) states" || na "Idle states" "none"
+# The processor's sensor (coretemp) first, else any sensor
 TEMP=""
+TSRC=""
 for h in /sys/class/hwmon/hwmon*; do
-	[ "$(cat $h/name 2>/dev/null)" = coretemp ] && TEMP=$(cat $h/temp*_input 2>/dev/null | head -1)
+	[ "$(cat $h/name 2>/dev/null)" = coretemp ] || continue
+	TEMP=$(cat $h/temp*_input 2>/dev/null | head -1)
+	TSRC=coretemp
 done
-[ -z "$TEMP" ] && TEMP=$(read_file /sys/class/thermal/thermal_zone0/temp)
+for t in /sys/class/hwmon/hwmon*/temp*_input /sys/class/thermal/thermal_zone*/temp; do
+	[ -n "$TEMP" ] && break
+	[ -r "$t" ] && TEMP=$(cat $t 2>/dev/null) && TSRC=$t
+done
+say "       Sensors: $(for h in /sys/class/hwmon/hwmon*; do printf '%s ' "$(cat $h/name 2>/dev/null)"; done)$(echo "$DMESG" | grep -i coretemp | tail -1)"
 if [ -n "$TEMP" ] && [ "$TEMP" -gt 10000 ] && [ "$TEMP" -lt 105000 ]; then
-	ok "Temperature" "$((TEMP / 1000)) C"
+	ok "Temperature" "$((TEMP / 1000)) C ($TSRC)"
 elif [ -n "$TEMP" ]; then
 	bad "Temperature" "unlikely value $TEMP"
 else
@@ -177,8 +189,15 @@ fi
 # Input
 INPUT=$(grep '^N: Name=' /proc/bus/input/devices | sed 's/N: Name=//; s/"//g')
 echo "$INPUT" | grep -qi 'AT Translated\|keyboard' && ok "Keyboard" "$(echo "$INPUT" | grep -i 'AT Translated\|keyboard' | head -1)" || bad "Keyboard" "not detected"
-TP=$(echo "$INPUT" | grep -i 'touchpad\|synaptics\|alps\|elantech\|mouse' | head -1)
+TP=$(echo "$INPUT" | grep -v '^S12 touchpad$' | grep -i 'touchpad\|synaptics\|alps\|elantech\|glidepoint\|mouse' | head -1)
 [ -n "$TP" ] && ok "Touchpad" "$TP" || bad "Touchpad" "not detected"
+if echo "$INPUT" | grep -qx 'S12 touchpad'; then
+	ok "Touchpad scrolling (tpd)" "two fingers or the right edge; tap to click"
+elif echo "$DMESG" | grep -q 'tpd: no touchpad'; then
+	na "Touchpad scrolling (tpd)" "no touchpad found by tpd (a mouse wheel scrolls)"
+else
+	bad "Touchpad scrolling (tpd)" "tpd is not running: $(echo "$DMESG" | grep 'tpd:' | tail -1)"
+fi
 echo "$INPUT" | grep -qi 'power button' && ok "Power button" || bad "Power button" "not detected"
 
 # USB
@@ -287,7 +306,9 @@ fi
 WIF=""
 for d in /sys/class/net/*; do [ -e $d/phy80211 ] && { WIF=${d##*/}; break; }; done
 if [ -z "$WIF" ]; then
-	if [ -n "$WIFI" ]; then
+	if [ -n "$WIFI" ] && echo "$DMESG" | grep -q 'b43.*irmware.*not found'; then
+		bad "Wi-Fi card" "$(echo $WIFI | cut -d' ' -f2): the b43 firmware is missing; run wifi-firmware (Ethernet needed once)"
+	elif [ -n "$WIFI" ]; then
 		bad "Wi-Fi card" "$(echo $WIFI | cut -d' ' -f2) has no driver: $(echo "$DMESG" | grep -i 'b43\|ssb\|bcma\|iwlwifi\|ath' | tail -2 | tr '\n' ' ')"
 	else
 		na "Wi-Fi card" "none found (a USB adapter works too)"

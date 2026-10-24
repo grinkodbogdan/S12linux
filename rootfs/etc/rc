@@ -14,6 +14,8 @@ hostname -F /etc/hostname
 # Only errors from the kernel on the screen; everything stays in dmesg
 dmesg -n 3
 ip link set lo up
+# The touchpad: scrolling with two fingers or the right edge, tap to click
+tpd &
 # The power button shuts down cleanly
 acpid -c /etc/acpi -l /run/acpid.log
 # Network: Ethernet and Wi-Fi, with DHCP; also finds the data stick (s12-data)

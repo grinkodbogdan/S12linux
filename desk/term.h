@@ -6,7 +6,7 @@
 
 #define TERM_MAX_COLS 200
 #define TERM_MAX_ROWS 80
-#define TERM_SCROLLBACK 200
+#define TERM_SCROLLBACK 1000
 
 typedef struct {
 	char ch;

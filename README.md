@@ -20,6 +20,10 @@ RAM: about 45 MB in use with the desktop running.
   `xbps-install -S nano`.
 - **Data stick:** `s12-data setup` keeps Wi-Fi networks, firmware and installed packages on a
   USB stick or SD card, across reboots.
+- **Touchpad:** two fingers, or one finger along the right edge, scroll; tap to click, tap with
+  two fingers for a right click (`tpd`). A mouse wheel scrolls too.
+- **Terminal:** 1000 lines of history: scroll with the touchpad or wheel, drag the bar on the
+  right, or Alt+Page Up / Alt+Page Down.
 - **Diagnostics:** `debug-test` checks every part of the laptop and writes a full log.
 
 ## Use
@@ -53,12 +57,13 @@ wifi off | on                      # the radio (the switch on the front of the S
 wifi country GB                    # allowed channels and power for your country
 ```
 
-Most IdeaPad S12s have a **Broadcom BCM4312** card (driver b43). Its firmware cannot be
-distributed, so it is extracted from Broadcom's driver on the laptop, once: connect the
-Ethernet cable and click **Install firmware** in the Wi-Fi window, or run `wifi-firmware`. Without
-a cable, copy `broadcom-wl-5.100.138.tar.bz2` to a USB stick and run
-`wifi-firmware /path/to/broadcom-wl-5.100.138.tar.bz2`. With a data stick, this is done once
-for good.
+Most IdeaPad S12s have a **Broadcom BCM4312** card (driver b43). `build.sh` extracts its
+firmware from Broadcom's driver into the image (with `b43-fwcutter`, as OpenWrt does), so Wi-Fi
+works at the first boot. Broadcom does not allow this firmware to be redistributed: keep images
+built this way for your own use, and build with `B43_FIRMWARE=0` for an image to share. Such an
+image extracts the firmware on the laptop instead: connect the Ethernet cable and click **Install
+firmware** in the Wi-Fi window, or run `wifi-firmware` (or `wifi-firmware FILE` with
+`broadcom-wl-5.100.138.tar.bz2` on a USB stick).
 
 Intel 5100/5150/1000 cards, Atheros cards, and USB adapters with Ralink/MediaTek (rt2800),
 Realtek (rtl8187, rtl8xxxu) and Atheros (ar9271) chips work without that step. Networks using
@@ -98,7 +103,7 @@ Open the Terminal and run `debug-test`. It lists the S12's chips and their drive
 part (`[ OK ]`, `[FAIL]`, `[ -- ]` not present), including Wi-Fi (card, driver, firmware, radio
 switch, networks in range), runs both processor threads under load, and writes everything (PCI
 devices, kernel log, `/sys` values, sound codec) to `/root/debug-test.txt`. Wi-Fi passwords are
-left out of it. The log is also copied to any plugged USB stick that can be written.
+left out of it. The log is also copied to USB sticks and SD cards (never to the laptop's disk). The log is also copied to any plugged USB stick that can be written.
 `debug-test --upload` uploads it to termbin.com and prints a short link (the page is public;
 it holds hardware details only).
 
@@ -123,8 +128,8 @@ the SHA-256 sums in `sources.sh`. Everything happens in `./work` (or `$WORK`); t
 | `build.sh`, `sources.sh` | Build script, and the sources with their checksums |
 | `kernel/s12.config` | Kernel options, applied on top of `i386_defconfig` |
 | `busybox/config` | BusyBox configuration |
-| `desk/` | The desktop (`desk`), the init program (`minit`) and `soundtest` |
-| `netsurf/` | Patch for NetSurf (framebuffer surface for a raw console, Ctrl+L, focus), settings |
+| `desk/` | The desktop (`desk`), the init program (`minit`), the touchpad daemon (`tpd`) and `soundtest` |
+| `netsurf/` | Patch for NetSurf (framebuffer surface for a raw console with mouse wheel, Ctrl+L, focus), build settings (`Makefile.config`), browser settings |
 | `wifi/` | wpa_supplicant build options |
 | `rootfs/` | Files copied into the root file system: startup (`etc/rc`), network daemon (`netd`), DHCP script, power button, `wifi`, `wifi-firmware`, `s12-data`, the XBPS wrapper and settings, `debug-test` |
 | `boot/grub.cfg` | Boot menu |

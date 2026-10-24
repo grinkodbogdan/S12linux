@@ -68,8 +68,29 @@ static void term_draw(mu_Context *ctx, Window *win) {
 	mu_draw_rect(ctx, r, mu_color(24, 24, 24, 255));
 	draw_border(ctx, r, mu_color(14, 14, 14, 255), 0);
 	int cw = font_mono->glyphs['M' - 32].adv, ch = font_mono->height;
-	int cols = (r.w - 16) / cw, rows = (r.h - 12) / ch;
+	int cols = (r.w - 24) / cw, rows = (r.h - 12) / ch;
 	term_resize(t, cols, rows);
+	/* Scrolling back: the wheel moves 3 lines a step, and the bar on the right can be dragged */
+	if (ctx->scroll_delta.y && mu_mouse_over(ctx, r)) {
+		t->scroll = mu_clamp(t->scroll - ctx->scroll_delta.y / 40 * 3, 0, t->sb_count);
+		ctx->scroll_delta.y = 0;
+	}
+	if (t->sb_count > 0) {
+		mu_Rect bar = mu_rect(r.x + r.w - 10, r.y + 2, 8, r.h - 4);
+		mu_Id id = mu_get_id(ctx, &a->t.scroll, sizeof(int *));
+		mu_update_control(ctx, id, bar, 0);
+		if (ctx->focus == id && ctx->mouse_down == MU_MOUSE_LEFT) {
+			/* The top of the bar is the oldest line */
+			int pos = mu_clamp(ctx->mouse_pos.y - bar.y, 0, bar.h);
+			t->scroll = t->sb_count - t->sb_count * pos / bar.h;
+		}
+		int total = t->sb_count + t->rows;
+		int th = mu_max(bar.h * t->rows / total, 20);
+		int ty = bar.y + (bar.h - th) * (t->sb_count - t->scroll) / mu_max(t->sb_count, 1);
+		mu_draw_rect(ctx, bar, mu_color(34, 34, 34, 255));
+		mu_draw_rect(ctx, mu_rect(bar.x + 1, ty, bar.w - 2, th),
+			ctx->focus == id || ctx->hover == id ? color_alpha(accent, 230) : mu_color(90, 90, 90, 255));
+	}
 	int ox = r.x + 8, oy = r.y + 6;
 	char buf[TERM_MAX_COLS + 1];
 	for (int y = 0; y < t->rows; y++) {
@@ -141,6 +162,17 @@ static int term_key(Window *win, const char *s, int len) {
 				a->close_requested = 1;
 		return 1;
 	}
+	/* Alt+Page Up / Alt+Page Down scroll a page back and forth (the console keeps Shift+Page Up) */
+	if (len == 5 && !memcmp(s, "\x1b\x1b[5~", 5)) {
+		a->t.scroll = mu_min(a->t.scroll + a->t.rows - 1, a->t.sb_count);
+		return 1;
+	}
+	if (len == 5 && !memcmp(s, "\x1b\x1b[6~", 5)) {
+		a->t.scroll = mu_max(a->t.scroll - (a->t.rows - 1), 0);
+		return 1;
+	}
+	/* Typing goes back to the bottom */
+	a->t.scroll = 0;
 	term_write(&a->t, s, len);
 	return 1;
 }

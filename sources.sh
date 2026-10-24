@@ -63,3 +63,8 @@ LICENSE|678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1
 # Package manager: static XBPS from Void Linux (installs packages from Void's i686 repository)
 XBPS_URL=https://repo-default.voidlinux.org/static/xbps-static-latest.i686-musl.tar.xz
 XBPS_SHA256=929175fc8dd57b54292de3075cf0c7158940d7b1fc6664f0d5f98d93693136be
+# Broadcom's driver, from which the firmware of the S12's BCM4312 Wi-Fi card is extracted at build
+# time (b43-fwcutter). Broadcom does not allow the firmware to be redistributed: images built with
+# it are for personal use. B43_FIRMWARE=0 builds an image without it (wifi-firmware then fetches it).
+B43_URLS="https://sources.openwrt.org/broadcom-wl-5.100.138.tar.bz2 https://www.lwfinger.com/b43-firmware/broadcom-wl-5.100.138.tar.bz2"
+B43_SHA256=f1e7067aac5b62b67b8b6e4c517990277804339ac16065eb13c731ff909ae46f

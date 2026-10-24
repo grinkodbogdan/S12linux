@@ -1,0 +1,11 @@
+#!/bin/sh
+# The b43 driver gives up on a card at boot if its firmware is missing. Once the firmware is in
+# /lib/firmware/b43, this asks the kernel to try again with the cards without a driver.
+for bus in ssb bcma; do
+	[ -d /sys/bus/$bus/devices ] || continue
+	for d in /sys/bus/$bus/devices/*; do
+		[ -e "$d/driver" ] && continue
+		echo "${d##*/}" > /sys/bus/$bus/drivers_probe 2> /dev/null
+	done
+done
+exit 0

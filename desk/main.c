@@ -1135,10 +1135,22 @@ static void render(void) {
 /* --- Input --- */
 
 static int mouse_fd = -1, kbd_fd = -1;
+/* Bytes per mouse packet: 4 once the wheel is enabled (IntelliMouse protocol) */
+static int mouse_packet = 3;
 static struct termios kbd_saved;
 
 static void input_init(void) {
 	mouse_fd = open("/dev/input/mice", O_RDWR | O_NONBLOCK);
+	/* The IntelliMouse sequence (sample rates 200, 100, 80) turns on the wheel: packets get a
+	 * fourth byte. The device answers each byte with an acknowledgement, dropped here */
+	static const unsigned char imps[6] = {0xf3, 200, 0xf3, 100, 0xf3, 80};
+	if (mouse_fd >= 0 && write(mouse_fd, imps, sizeof(imps)) == sizeof(imps)) {
+		unsigned char ack[16];
+		usleep(20000);
+		while (read(mouse_fd, ack, sizeof(ack)) > 0)
+			;
+		mouse_packet = 4;
+	}
 	kbd_fd = open("/dev/tty", O_RDWR | O_NONBLOCK);
 	/* Without a controlling terminal, the keyboard is read from the first console */
 	if (kbd_fd < 0)
@@ -1170,11 +1182,11 @@ static void read_mouse_discard(void) {
 }
 
 static int read_mouse(void) {
-	unsigned char p[3];
+	unsigned char p[4] = {0};
 	int changed = 0;
-	while (mouse_fd >= 0 && read(mouse_fd, p, 3) == 3) {
+	while (mouse_fd >= 0 && read(mouse_fd, p, mouse_packet) == mouse_packet) {
 		if (getenv("DESK_DEBUG"))
-			fprintf(stderr, "mouse %02x %02x %02x\n", p[0], p[1], p[2]);
+			fprintf(stderr, "mouse %02x %02x %02x %02x\n", p[0], p[1], p[2], p[3]);
 		if (!(p[0] & 0x08))
 			continue;
 		int dx = p[1] - ((p[0] << 4) & 0x100);
@@ -1200,6 +1212,9 @@ static int read_mouse(void) {
 				mu_input_mouseup(ctx, mouse_pos.x, mouse_pos.y, map[b]);
 		}
 		mouse_buttons = p[0] & 7;
+		/* Wheel: the fourth byte is positive when turned up, which scrolls back (negative in microui) */
+		if (mouse_packet == 4 && (signed char)p[3])
+			mu_input_scroll(ctx, 0, -(signed char)p[3] * 40);
 		changed = 1;
 	}
 	return changed;

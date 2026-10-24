@@ -41,9 +41,6 @@ if command -v s12-data > /dev/null && s12-data save --quiet; then
 else
 	echo "Tip: with a data stick (s12-data setup), the firmware is kept for the next boots."
 fi
-# The card starts within a few seconds (netd brings it up)
-for d in /sys/class/net/*; do
-	[ -e $d/phy80211 ] || continue
-	[ "$(basename "$(readlink $d/device/driver)")" = b43 ] && ip link set ${d##*/} up 2> /dev/null || true
-done
+# The driver tries the card again; netd then starts Wi-Fi within a few seconds
+/usr/libexec/s12/b43-reprobe
 echo "Done. Choose a network with 'wifi scan' and 'wifi connect NAME PASSWORD', or in Menu > Wi-Fi."

@@ -26,9 +26,13 @@ mount_part() {
 	mount -t $T "$1" $MNT
 }
 
+# Partitions of USB sticks and SD cards: never the laptop's own disk
 partitions() {
 	for p in /dev/sd[a-z][0-9]* /dev/mmcblk[0-9]p[0-9]*; do
 		[ -b "$p" ] || continue
+		d=${p#/dev/}
+		case $d in mmcblk*) d=${d%p*} ;; *) d=${d%%[0-9]*} ;; esac
+		case $(readlink -f /sys/block/$d 2>/dev/null) in */usb*|*/mmc*) ;; *) continue ;; esac
 		# Skip the boot stick, which is read-only
 		grep -q "^$p " /proc/mounts && continue
 		echo $p
@@ -40,6 +44,7 @@ restore() {
 	if [ -d $DIR/firmware ]; then
 		mkdir -p /lib/firmware
 		cp -a $DIR/firmware/. /lib/firmware/
+		/usr/libexec/s12/b43-reprobe
 	fi
 	if [ -s $DIR/wpa_supplicant.conf ]; then
 		cp $DIR/wpa_supplicant.conf /etc/wpa_supplicant.conf

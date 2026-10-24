@@ -12,6 +12,8 @@ TOP=$(cd "$(dirname "$0")" && pwd)
 WORK=${WORK:-$TOP/work}
 DL=$WORK/dl
 JOBS=${JOBS:-$(nproc)}
+# 1: the Broadcom Wi-Fi firmware is extracted into the image (personal use only, see sources.sh)
+B43_FIRMWARE=${B43_FIRMWARE:-1}
 . "$TOP/sources.sh"
 
 log() { printf '\n== %s\n' "$*"; }
@@ -50,6 +52,13 @@ step_fetch() {
 	for f in $REGDB_FILES; do
 		fetch_one "$REGDB_URL/${f%%|*}?h=$REGDB_TAG" "${f#*|}" "regdb/${f%%|*}"
 	done
+	if [ "$B43_FIRMWARE" = 1 ] && [ ! -s "$DL/broadcom-wl-5.100.138.tar.bz2" ]; then
+		for u in $B43_URLS; do
+			curl -fL --retry 2 -o "$DL/broadcom-wl-5.100.138.tar.bz2.part" "$u" && break
+		done
+		mv "$DL/broadcom-wl-5.100.138.tar.bz2.part" "$DL/broadcom-wl-5.100.138.tar.bz2"
+	fi
+	[ "$B43_FIRMWARE" = 1 ] && fetch_one "${B43_URLS%% *}" "$B43_SHA256"
 	# The static XBPS is rebuilt from time to time: it is checked against Void's own list
 	fetch_one "$XBPS_URL" -
 	SUM=$(curl -fsSL "${XBPS_URL%/*}/sha256sums.txt" | awk -v f="${XBPS_URL##*/}" '$2 == f { print $1 }')
@@ -167,6 +176,14 @@ step_web() {
 			patch -d $NS -p1 < "$TOP/netsurf/netsurf-s12.patch"
 			touch $NS/.s12-patched
 		fi
+		# NetSurf links with -liconv, which musl's C library provides: an empty library satisfies it
+		if [ ! -f $SYS/lib/libiconv.a ]; then
+			echo 'int s12_iconv_is_in_libc;' > $W/iconv.c
+			$CC -c -o $W/iconv.o $W/iconv.c && $AR rcs $SYS/lib/libiconv.a $W/iconv.o
+		fi
+		# Resource and font paths, features; then the libraries built above
+		cp "$TOP/netsurf/Makefile.config" $NS/netsurf/Makefile.config
+		printf 'CFLAGS += -I%s/include -O2 -fno-stack-protector\nLDFLAGS += -L%s/lib -static\n' $SYS $SYS >> $NS/netsurf/Makefile.config
 		export PKG_CONFIG_PATH=
 		export CFLAGS="-I$SYS/include -O2 -fno-stack-protector" LDFLAGS="-L$SYS/lib"
 		unset CPPFLAGS
@@ -205,6 +222,9 @@ step_wifi() {
 		make -C $W/src/iw-6.17 -j$JOBS CC=$CC LDFLAGS=-static PKG_CONFIG=pkg-config > $L/iw.log 2>&1
 		echo b43-fwcutter
 		make -C $W/src/b43-fwcutter-019 CC=$CC LDFLAGS=-static > $L/b43.log 2>&1
+		# A copy for the build machine, to extract the firmware into the image
+		rm -rf $W/b43-fwcutter-host && cp -r $W/src/b43-fwcutter-019 $W/b43-fwcutter-host
+		make -C $W/b43-fwcutter-host clean > /dev/null && make -C $W/b43-fwcutter-host CC=gcc >> $L/b43.log 2>&1
 	)
 }
 
@@ -235,6 +255,7 @@ step_rootfs() {
 	for c in poweroff reboot halt; do ln -s init $R/usr/bin/$c; done
 	cp $WORK/desk/desk $R/usr/bin/desk
 	cp $WORK/desk/soundtest $R/usr/bin/soundtest
+	cp $WORK/desk/tpd $R/usr/bin/tpd
 	cp -a "$TOP/rootfs/." $R/
 	ln -s /run/resolv.conf $R/etc/resolv.conf
 	ln -s /proc/mounts $R/etc/mtab
@@ -258,6 +279,14 @@ step_rootfs() {
 	# Older drivers look for the Intel firmware at the top
 	for f in $R/usr/lib/firmware/intel/iwlwifi/*; do ln -s intel/iwlwifi/${f##*/} $R/usr/lib/firmware/${f##*/}; done
 	cp "$DL/regdb/regulatory.db" "$DL/regdb/regulatory.db.p7s" $R/usr/lib/firmware/
+	# Broadcom BCM4312 (b43): firmware extracted from Broadcom's driver
+	if [ "$B43_FIRMWARE" = 1 ]; then
+		rm -rf $WORK/b43tmp && mkdir -p $WORK/b43tmp
+		tar xjf "$DL/broadcom-wl-5.100.138.tar.bz2" -C $WORK/b43tmp broadcom-wl-5.100.138/linux/wl_apsta.o
+		$WORK/wifi/b43-fwcutter-host/b43-fwcutter -w $R/usr/lib/firmware $WORK/b43tmp/broadcom-wl-5.100.138/linux/wl_apsta.o > /dev/null
+		rm -rf $WORK/b43tmp
+		echo "b43 firmware: $(ls $R/usr/lib/firmware/b43 | wc -l) files"
+	fi
 	mkdir -p $R/usr/share/licenses/wireless-regdb && cp "$DL/regdb/LICENSE" $R/usr/share/licenses/wireless-regdb/
 	# Web browser: NetSurf with its resources, fonts, and the Mozilla CA certificates
 	mkdir -p $R/usr/share/netsurf $R/usr/share/fonts $R/etc/ssl/certs $R/root/.netsurf

@@ -15,6 +15,7 @@ export PATH=/usr/bin:/bin
 CONF=/etc/wpa_supplicant.conf
 TICK=0
 RESTORED=0
+CLOCK=0
 
 wifi_line() {
 	IF=$1
@@ -92,6 +93,13 @@ while :; do
 		RESTORED=1
 		(xbps-install -Sy $(cat /data/s12linux/packages) > /run/xbps-restore.log 2>&1 &&
 			echo "netd: packages installed again: $(tr '\n' ' ' < /data/s12linux/packages)" > /dev/kmsg) &
+	fi
+	# The clock, from the internet: the BIOS clock is often wrong on old laptops, and secure sites
+	# reject a wrong date. Only the system's time is set, not the BIOS clock (Windows keeps it)
+	if [ $CLOCK = 0 ] && grep -q ' active ' /run/net/status; then
+		CLOCK=1
+		(ntpd -n -q -p pool.ntp.org -p time.google.com > /dev/null 2>&1 &&
+			echo "netd: clock set from the internet: $(date)" > /dev/kmsg) &
 	fi
 	TICK=$((TICK + 1))
 	sleep 2
